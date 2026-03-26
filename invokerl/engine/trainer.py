@@ -447,7 +447,8 @@ class Trainer:
             f"accum={cfg.accumulation_steps}, group_size={cfg.group_size}"
         )
 
-        for step in range(start_step, start_step + cfg.total_steps):
+        end_step = cfg.total_steps  # total_steps is the absolute target
+        for step in range(start_step, end_step):
             t0 = time.time()
             self.step = step
             self.algorithm.on_step_start(step)
@@ -529,7 +530,7 @@ class Trainer:
             )
 
         # Save final checkpoint
-        self.save_checkpoint(start_step + cfg.total_steps)
+        self.save_checkpoint(end_step)
 
         # Save history
         history_path = os.path.join(cfg.output_dir, "training_history.json")
