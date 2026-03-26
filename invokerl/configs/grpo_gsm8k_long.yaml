@@ -1,5 +1,5 @@
 # GRPO 1000-step long run on GSM8K — single GPU
-# Hyperparameters TBD from screening sweep winner
+# Sweep winner: lr=1e-5 (+4pp over baseline at step 50)
 model:
   name_or_path: Qwen/Qwen3-0.6B
   dtype: bfloat16
@@ -7,22 +7,22 @@ model:
 algorithm:
   name: grpo
   clip_eps: 0.2
-  beta: 0.04        # KL penalty coefficient — update from sweep
+  beta: 0.04        # sweep: 0.02 and 0.08 both worse
 
 training:
   total_steps: 1000
-  lr: 5.0e-6        # update from sweep winner
+  lr: 1.0e-5        # sweep winner: 55.5% at step 50 vs 51.5% baseline
   weight_decay: 0.01
   grad_clip: 1.0
   warmup_steps: 50
   accumulation_steps: 4
   batch_size: 1
-  group_size: 4      # update from sweep winner
+  group_size: 4      # sweep: group_size=8 marginal, stick with 4
 
 generation:
   max_new_tokens: 512
   max_model_len: 2048
-  temperature: 0.9   # update from sweep winner
+  temperature: 0.9   # sweep: temp=0.7 no improvement
   top_k: 50
   gpu_memory_utilization: 0.3
 
