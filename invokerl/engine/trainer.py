@@ -59,6 +59,8 @@ class TrainerConfig:
     weight_decay: float = 0.01
     grad_clip: float = 1.0
     warmup_steps: int = 50
+    lr_schedule: str = "constant"   # "constant" or "cosine" (after warmup)
+    lr_end: float = 0.0             # final LR for cosine schedule (default: 0)
     accumulation_steps: int = 4     # micro-batches per optimizer step
 
     # Generation
@@ -73,6 +75,7 @@ class TrainerConfig:
     eval_every: int = 50
     save_every: int = 100
     eval_samples: int = 50
+    max_checkpoints: int = 2          # keep only the N most recent checkpoints
     output_dir: str = "./checkpoints"
 
 
@@ -115,11 +118,23 @@ class Trainer:
             weight_decay=config.weight_decay,
         )
 
-        # LR scheduler: linear warmup then constant
+        # LR scheduler: linear warmup, then constant or cosine decay
+        import math
+        _warmup = config.warmup_steps
+        _total = config.total_steps
+        _schedule = config.lr_schedule
+        _lr_min_ratio = config.lr_end / config.lr if config.lr > 0 else 0.0
+
         def lr_lambda(step: int) -> float:
-            if step < config.warmup_steps:
-                return (step + 1) / config.warmup_steps
-            return 1.0
+            if step < _warmup:
+                return (step + 1) / _warmup
+            if _schedule == "cosine":
+                progress = (step - _warmup) / max(1, _total - _warmup)
+                progress = min(progress, 1.0)
+                return _lr_min_ratio + (1.0 - _lr_min_ratio) * 0.5 * (
+                    1.0 + math.cos(math.pi * progress)
+                )
+            return 1.0  # constant
 
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(
             self.optimizer, lr_lambda
@@ -338,7 +353,30 @@ class Trainer:
         torch.save(state, os.path.join(ckpt_dir, "training_state.pt"))
 
         logger.info(f"Checkpoint saved to {ckpt_dir}")
+
+        # Remove old checkpoints if we exceed max_checkpoints
+        self._cleanup_old_checkpoints()
+
         return ckpt_dir
+
+    def _cleanup_old_checkpoints(self) -> None:
+        """Remove oldest checkpoints if we exceed max_checkpoints."""
+        import glob as glob_mod
+        max_keep = self.config.max_checkpoints
+        if max_keep <= 0:
+            return
+
+        pattern = os.path.join(self.config.output_dir, "step_*")
+        ckpt_dirs = sorted(
+            glob_mod.glob(pattern),
+            key=lambda d: int(os.path.basename(d).split("_")[1]),
+        )
+
+        while len(ckpt_dirs) > max_keep:
+            oldest = ckpt_dirs.pop(0)
+            import shutil
+            shutil.rmtree(oldest, ignore_errors=True)
+            logger.info(f"Removed old checkpoint: {oldest}")
 
     def load_checkpoint(self, ckpt_dir: str) -> int:
         """Load model and training state from checkpoint.

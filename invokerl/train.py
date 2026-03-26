@@ -74,6 +74,8 @@ def build_trainer_config(cfg: dict) -> TrainerConfig:
         weight_decay=float(training.get("weight_decay", 0.01)),
         grad_clip=float(training.get("grad_clip", 1.0)),
         warmup_steps=training.get("warmup_steps", 50),
+        lr_schedule=training.get("lr_schedule", "constant"),
+        lr_end=float(training.get("lr_end", 0.0)),
         accumulation_steps=training.get("accumulation_steps", 4),
         batch_size=training.get("batch_size", 4),
         group_size=training.get("group_size", 4),
@@ -86,6 +88,7 @@ def build_trainer_config(cfg: dict) -> TrainerConfig:
         eval_every=log_cfg.get("eval_every", 50),
         save_every=log_cfg.get("save_every", 100),
         eval_samples=log_cfg.get("eval_samples", 50),
+        max_checkpoints=log_cfg.get("max_checkpoints", 2),
         output_dir=log_cfg.get("output_dir", "./checkpoints"),
     )
 
