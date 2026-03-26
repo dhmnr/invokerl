@@ -32,5 +32,5 @@ reward:
 logging:
   log_every: 10
   eval_every: 50
-  save_every: 100
+  save_every: 200
   output_dir: ./checkpoints/grpo_gsm8k

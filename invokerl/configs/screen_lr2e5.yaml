@@ -32,5 +32,5 @@ reward:
 logging:
   log_every: 10
   eval_every: 50
-  save_every: 50
+  save_every: 9999
   output_dir: ./checkpoints/screen_lr2e5

@@ -1,0 +1,38 @@
+# GRPO 1000-step long run on GSM8K — single GPU
+# Hyperparameters TBD from screening sweep winner
+model:
+  name_or_path: Qwen/Qwen3-0.6B
+  dtype: bfloat16
+
+algorithm:
+  name: grpo
+  clip_eps: 0.2
+  beta: 0.04        # KL penalty coefficient — update from sweep
+
+training:
+  total_steps: 1000
+  lr: 5.0e-6        # update from sweep winner
+  weight_decay: 0.01
+  grad_clip: 1.0
+  warmup_steps: 50
+  accumulation_steps: 4
+  batch_size: 1
+  group_size: 4      # update from sweep winner
+
+generation:
+  max_new_tokens: 512
+  max_model_len: 2048
+  temperature: 0.9   # update from sweep winner
+  top_k: 50
+  gpu_memory_utilization: 0.3
+
+reward:
+  type: rule
+  dataset: gsm8k
+
+logging:
+  log_every: 10       # training metrics every 10 steps
+  eval_every: 50      # 200-sample eval every 50 steps
+  eval_samples: 200   # reliable eval signal
+  save_every: 200     # checkpoints every 200 steps only (saves disk)
+  output_dir: ./checkpoints/grpo_gsm8k_long
