@@ -142,11 +142,6 @@ class VLLMGenerator(BaseGenerator):
             seed: Random seed for reproducibility.
             max_model_len: Maximum sequence length. None = use model config.
         """
-        # Keep vLLM V1 engine in-process (no subprocess) so we can do direct
-        # GPU parameter copy for weight sync (~2ms vs ~1600ms with disk).
-        # V1 features (chunked prefill, CUDA graphs, prefix caching) are preserved.
-        os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-
         from vllm import LLM
 
         self.llm = LLM(
