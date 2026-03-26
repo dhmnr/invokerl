@@ -16,6 +16,11 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
+# Disable vLLM V1 multiprocessing so the model runs in-process.
+# This enables direct GPU parameter copy for weight sync (~2.8ms vs ~1600ms).
+# Must be set before importing vllm.
+os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
 import torch
 from torch import Tensor
 
@@ -137,6 +142,11 @@ class VLLMGenerator(BaseGenerator):
             seed: Random seed for reproducibility.
             max_model_len: Maximum sequence length. None = use model config.
         """
+        # Keep vLLM V1 engine in-process (no subprocess) so we can do direct
+        # GPU parameter copy for weight sync (~2ms vs ~1600ms with disk).
+        # V1 features (chunked prefill, CUDA graphs, prefix caching) are preserved.
+        os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
         from vllm import LLM
 
         self.llm = LLM(
