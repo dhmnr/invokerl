@@ -2,7 +2,8 @@
 
 Creates a timeline showing simulated GPU utilization for each phase of the
 GRPO training loop, based on profiling data from profile_summary.json.
-Each phase is color-coded and labeled, with step boundaries marked.
+Each phase uses a colorblind-safe palette with hatching patterns and
+direct text labels for accessibility.
 """
 
 import json
@@ -13,16 +14,16 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from pathlib import Path
 
-# Phase colors and approximate GPU utilization per phase
+# Colorblind-safe palette (Wong 2011) + hatching patterns + direct labels
 PHASE_CONFIG = {
-    "generation":      {"color": "#4C72B0", "gpu_util": 0.35, "label": "Generation (vLLM)"},
-    "reward":          {"color": "#55A868", "gpu_util": 0.05, "label": "Reward"},
-    "ref_forward":     {"color": "#C44E52", "gpu_util": 0.85, "label": "Ref Forward"},
-    "policy_forward":  {"color": "#8172B3", "gpu_util": 0.95, "label": "Policy Forward"},
-    "loss_computation":{"color": "#CCB974", "gpu_util": 0.40, "label": "Loss Computation"},
-    "backward":        {"color": "#DD8452", "gpu_util": 0.90, "label": "Backward"},
-    "optimizer_step":  {"color": "#64B5CD", "gpu_util": 0.60, "label": "Optimizer Step"},
-    "weight_sync":     {"color": "#DA8BC3", "gpu_util": 0.15, "label": "Weight Sync (disk I/O)"},
+    "generation":      {"color": "#0072B2", "gpu_util": 0.35, "label": "Generation (vLLM)",   "hatch": "//",  "short": "GEN"},
+    "reward":          {"color": "#009E73", "gpu_util": 0.05, "label": "Reward",               "hatch": "..",  "short": "RWD"},
+    "ref_forward":     {"color": "#D55E00", "gpu_util": 0.85, "label": "Ref Forward",          "hatch": "\\\\","short": "REF"},
+    "policy_forward":  {"color": "#E69F00", "gpu_util": 0.95, "label": "Policy Forward",       "hatch": "xx",  "short": "FWD"},
+    "loss_computation":{"color": "#F0E442", "gpu_util": 0.40, "label": "Loss",                 "hatch": "++",  "short": "LOSS"},
+    "backward":        {"color": "#CC79A7", "gpu_util": 0.90, "label": "Backward",             "hatch": "--",  "short": "BWD"},
+    "optimizer_step":  {"color": "#56B4E9", "gpu_util": 0.60, "label": "Optimizer",            "hatch": "||",  "short": "OPT"},
+    "weight_sync":     {"color": "#999999", "gpu_util": 0.15, "label": "Weight Sync (disk I/O)","hatch": "oo", "short": "SYNC"},
 }
 
 # Phase order within a step
@@ -117,12 +118,12 @@ def plot_gpu_utilization(
     total_step_ms: float,
     output_path: str,
 ):
-    fig, ax = plt.subplots(figsize=(18, 6))
+    fig, ax = plt.subplots(figsize=(20, 7))
 
     # Plot the utilization trace as a thin line
-    ax.plot(time_ms / 1000, gpu_util * 100, color="gray", linewidth=0.3, alpha=0.5)
+    ax.plot(time_ms / 1000, gpu_util * 100, color="#333333", linewidth=0.4, alpha=0.4)
 
-    # Fill each phase with its color
+    # Fill each phase with color + hatching pattern
     for start_ms, end_ms, phase_name, step_idx in phase_spans:
         cfg = PHASE_CONFIG[phase_name]
         mask = (time_ms >= start_ms) & (time_ms <= end_ms)
@@ -130,9 +131,40 @@ def plot_gpu_utilization(
             continue
         t_sec = time_ms[mask] / 1000
         u_pct = gpu_util[mask] * 100
-        ax.fill_between(t_sec, 0, u_pct, color=cfg["color"], alpha=0.7)
 
-    # Mark step boundaries
+        # Color fill
+        ax.fill_between(t_sec, 0, u_pct, color=cfg["color"], alpha=0.55)
+        # Hatching overlay for colorblind accessibility
+        ax.fill_between(t_sec, 0, u_pct, facecolor="none",
+                         edgecolor="#333333", alpha=0.25,
+                         hatch=cfg["hatch"], linewidth=0.5)
+
+    # Direct text labels on each phase band
+    for start_ms, end_ms, phase_name, step_idx in phase_spans:
+        cfg = PHASE_CONFIG[phase_name]
+        duration_ms = end_ms - start_ms
+        mid_t = (start_ms + end_ms) / 2 / 1000
+        avg_util = cfg["gpu_util"] * 100
+
+        # Only label phases wide enough to fit text
+        if duration_ms > 100:
+            label = cfg["short"]
+            # Place label at center of the phase band
+            label_y = min(avg_util * 0.5, 45) if avg_util < 50 else avg_util * 0.5
+            fontsize = 10 if duration_ms > 500 else 8
+            # Add duration for major phases
+            if duration_ms > 300:
+                label += f"\n{duration_ms/1000:.1f}s"
+            ax.text(
+                mid_t, label_y, label,
+                ha="center", va="center", fontsize=fontsize, fontweight="bold",
+                color="black",
+                bbox=dict(boxstyle="round,pad=0.15", facecolor="white",
+                          edgecolor="none", alpha=0.75),
+                zorder=5,
+            )
+
+    # Step boundaries — thick black dashed lines
     num_steps = max(s[3] for s in phase_spans) + 1
     for step_idx in range(num_steps):
         step_phases = [s for s in phase_spans if s[3] == step_idx]
@@ -141,49 +173,59 @@ def plot_gpu_utilization(
         step_start = step_phases[0][0] / 1000
         step_end = step_phases[-1][1] / 1000
 
-        # Step boundary lines
+        # Thick step boundary lines
         if step_idx > 0:
-            ax.axvline(step_start, color="white", linewidth=2, linestyle="-", alpha=0.9)
-            ax.axvline(step_start, color="black", linewidth=1, linestyle="--", alpha=0.5)
+            ax.axvline(step_start, color="black", linewidth=2.5,
+                       linestyle="--", alpha=0.8, zorder=6)
 
-        # Step label at top
+        # Step label at top — large and clear
         mid = (step_start + step_end) / 2
         ax.text(
-            mid, 103, f"Step {step_idx + 1}",
-            ha="center", va="bottom", fontsize=12, fontweight="bold",
-            bbox=dict(boxstyle="round,pad=0.3", facecolor="white", edgecolor="gray", alpha=0.9),
+            mid, 107, f"Step {step_idx + 1}",
+            ha="center", va="bottom", fontsize=14, fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.4", facecolor="white",
+                      edgecolor="black", linewidth=1.5, alpha=0.95),
+            zorder=7,
         )
 
-    # Legend
+    # Legend with hatching patterns — colorblind-safe
     handles = []
     for phase_name in PHASE_ORDER:
         cfg = PHASE_CONFIG[phase_name]
-        handles.append(mpatches.Patch(color=cfg["color"], alpha=0.7, label=cfg["label"]))
+        pct = cfg["gpu_util"] * 100
+        patch = mpatches.Patch(
+            facecolor=cfg["color"], edgecolor="#333333",
+            hatch=cfg["hatch"], alpha=0.6,
+            label=f'{cfg["label"]} (~{pct:.0f}% GPU)',
+        )
+        handles.append(patch)
     ax.legend(
-        handles=handles, loc="upper right", ncol=2, fontsize=9,
-        framealpha=0.9, edgecolor="gray",
+        handles=handles, loc="upper right", ncol=2, fontsize=10,
+        framealpha=0.95, edgecolor="black", handlelength=2.5,
     )
 
     # Formatting
-    ax.set_xlabel("Time (seconds)", fontsize=12)
-    ax.set_ylabel("GPU Utilization (%)", fontsize=12)
+    ax.set_xlabel("Time (seconds)", fontsize=13)
+    ax.set_ylabel("GPU SM Utilization (%)", fontsize=13)
     ax.set_title(
         "GPU Utilization Over 3 GRPO Training Steps — RTX 5090, Qwen3-0.6B\n"
         f"(~{total_step_ms/1000:.1f}s per step, {total_step_ms*3/1000:.1f}s total)",
-        fontsize=14, fontweight="bold",
+        fontsize=15, fontweight="bold",
     )
-    ax.set_ylim(0, 110)
+    ax.set_ylim(0, 118)
     ax.set_xlim(time_ms[0] / 1000, time_ms[-1] / 1000)
-    ax.grid(axis="y", alpha=0.3)
+    ax.grid(axis="y", alpha=0.3, linestyle=":")
 
-    # Add MFU annotation
+    # Annotation box
     ax.text(
         0.01, 0.02,
-        "Generation (70%): memory-bound autoregressive decoding\n"
-        "Training (forward+backward): 79-94% of peak BF16 TFLOPS\n"
-        "Weight sync (20%): disk-based safetensors save+reload",
-        transform=ax.transAxes, fontsize=8, verticalalignment="bottom",
-        bbox=dict(boxstyle="round", facecolor="lightyellow", alpha=0.8),
+        "GEN = autoregressive decode (memory-bound, 70% of wall time)\n"
+        "FWD/BWD = policy training (93% MFU, 7% of wall time)\n"
+        "SYNC = safetensors disk save + vLLM reload (20% of wall time)",
+        transform=ax.transAxes, fontsize=9, verticalalignment="bottom",
+        fontfamily="monospace",
+        bbox=dict(boxstyle="round,pad=0.4", facecolor="#FFFFF0",
+                  edgecolor="black", alpha=0.9),
     )
 
     plt.tight_layout()
