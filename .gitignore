@@ -1,0 +1,33 @@
+# Checkpoints and model weights
+checkpoints/
+grpo_checkpoints/
+*.safetensors
+*.bin
+
+# Training logs and results
+results/
+*.log
+sweep_results.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

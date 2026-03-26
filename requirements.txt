@@ -1,0 +1,4 @@
+cuda-tile
+cupy-cuda13x
+numpy
+safetensors

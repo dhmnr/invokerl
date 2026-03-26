@@ -1,0 +1,36 @@
+# GRPO sweep: group_size=8 (more reward variance per group)
+model:
+  name_or_path: Qwen/Qwen3-0.6B
+  dtype: bfloat16
+
+algorithm:
+  name: grpo
+  clip_eps: 0.2
+  beta: 0.04
+
+training:
+  total_steps: 200
+  lr: 1.0e-6
+  weight_decay: 0.01
+  grad_clip: 1.0
+  warmup_steps: 50
+  accumulation_steps: 4
+  batch_size: 1
+  group_size: 8
+
+generation:
+  max_new_tokens: 512
+  max_model_len: 2048
+  temperature: 0.9
+  top_k: 50
+  gpu_memory_utilization: 0.3
+
+reward:
+  type: rule
+  dataset: gsm8k
+
+logging:
+  log_every: 10
+  eval_every: 50
+  save_every: 100
+  output_dir: ./checkpoints/sweep_group8

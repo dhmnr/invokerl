@@ -1,0 +1,36 @@
+# GRPO training on GSM8K — single GPU
+model:
+  name_or_path: Qwen/Qwen3-0.6B
+  dtype: bfloat16
+
+algorithm:
+  name: grpo
+  clip_eps: 0.2
+  beta: 0.04        # KL penalty coefficient
+
+training:
+  total_steps: 200
+  lr: 5.0e-6
+  weight_decay: 0.01
+  grad_clip: 1.0
+  warmup_steps: 50
+  accumulation_steps: 4
+  batch_size: 1      # prompts per micro-batch (matches tilerl v8)
+  group_size: 4      # completions per prompt
+
+generation:
+  max_new_tokens: 512            # Qwen3 uses <think> tags — needs headroom
+  max_model_len: 2048            # cap vLLM KV cache — default 40960 wastes ~10 GB
+  temperature: 0.9
+  top_k: 50
+  gpu_memory_utilization: 0.3    # leave 70% for bf16 policy + optimizer + ref model
+
+reward:
+  type: rule          # rule-based answer matching
+  dataset: gsm8k
+
+logging:
+  log_every: 10
+  eval_every: 50
+  save_every: 100
+  output_dir: ./checkpoints/grpo_gsm8k
