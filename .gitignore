@@ -4,8 +4,7 @@ grpo_checkpoints/
 *.safetensors
 *.bin
 
-# Training logs and results
-results/
+# Training logs (but keep results/ for graphs and metrics)
 *.log
 sweep_results.json
 
