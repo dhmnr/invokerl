@@ -7,6 +7,8 @@ grpo_checkpoints/
 # Training logs (but keep results/ for graphs and metrics)
 *.log
 sweep_results.json
+*.nsys-rep
+*.jsonl
 
 # Python
 __pycache__/
