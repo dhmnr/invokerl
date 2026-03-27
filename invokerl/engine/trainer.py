@@ -412,6 +412,9 @@ class Trainer:
         Returns:
             The step number to resume from.
         """
+        # Loading a checkpoint replaces the model — shared weights are broken.
+        self._weights_shared = False
+
         # Load model weights
         from transformers import AutoModelForCausalLM
         self.policy.model = AutoModelForCausalLM.from_pretrained(
@@ -422,12 +425,28 @@ class Trainer:
         )
         self.policy.model.train()
 
-        # Reinitialize optimizer with new parameters
+        # Re-establish shared weights with vLLM if possible.
+        if hasattr(self, "_vllm_params"):
+            try:
+                vllm_params = self.generator.get_model_params()
+                shared = self.policy.share_vllm_weights(vllm_params)
+                if shared > 0:
+                    self._weights_shared = True
+                    self._vllm_params = vllm_params
+                    logger.info("Re-established shared weights after checkpoint load")
+            except Exception as e:
+                logger.warning("Could not re-share weights after resume: %s", e)
+
+        # Reinitialize optimizer with new parameters (after sharing)
         self.optimizer = AdamW(
             self.policy.parameters(),
             lr=self.config.lr,
             weight_decay=self.config.weight_decay,
         )
+
+        # Sync weights to vLLM (needed if sharing failed)
+        if not self._weights_shared:
+            self.generator.update_weights(self.policy.get_state_dict())
 
         # Load training state
         state_path = os.path.join(ckpt_dir, "training_state.pt")
