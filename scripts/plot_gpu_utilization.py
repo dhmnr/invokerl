@@ -23,7 +23,7 @@ PHASE_CONFIG = {
     "loss_computation":{"color": "#F0E442", "gpu_util": 0.40, "label": "Loss",                 "hatch": "++",  "short": "LOSS"},
     "backward":        {"color": "#CC79A7", "gpu_util": 0.90, "label": "Backward",             "hatch": "--",  "short": "BWD"},
     "optimizer_step":  {"color": "#56B4E9", "gpu_util": 0.60, "label": "Optimizer",            "hatch": "||",  "short": "OPT"},
-    "weight_sync":     {"color": "#999999", "gpu_util": 0.15, "label": "Weight Sync (disk I/O)","hatch": "oo", "short": "SYNC"},
+    "weight_sync":     {"color": "#999999", "gpu_util": 0.70, "label": "Weight Sync (GPU copy)", "hatch": "oo", "short": "SYNC"},
 }
 
 # Phase order within a step
@@ -91,15 +91,9 @@ def simulate_gpu_trace(phases: dict, num_steps: int = 3, resolution_ms: float = 
                     decode_util[i:end_spike] = np.random.normal(0.55, 0.05, end_spike - i)
                 utils[prefill_end:] = np.clip(decode_util, 0.02, 1.0)
 
-            # Weight sync is mostly CPU/disk, low GPU util with brief spikes
+            # Weight sync is now a direct GPU memcpy (~2.8ms), brief high utilization
             if phase_name == "weight_sync":
-                utils = np.clip(np.random.normal(0.08, 0.04, n_points), 0.01, 0.3)
-                # Brief spike when vLLM reloads weights to GPU
-                reload_start = int(n_points * 0.7)
-                reload_end = int(n_points * 0.85)
-                utils[reload_start:reload_end] = np.clip(
-                    np.random.normal(0.45, 0.08, reload_end - reload_start), 0.2, 0.7
-                )
+                utils = np.clip(np.random.normal(0.70, 0.10, n_points), 0.3, 1.0)
 
             total_points.append((times, utils))
             t = end
@@ -219,9 +213,9 @@ def plot_gpu_utilization(
     # Annotation box
     ax.text(
         0.01, 0.02,
-        "GEN = autoregressive decode (memory-bound, 70% of wall time)\n"
-        "FWD/BWD = policy training (93% MFU, 7% of wall time)\n"
-        "SYNC = safetensors disk save + vLLM reload (20% of wall time)",
+        "GEN = autoregressive decode (memory-bound, 87% of wall time)\n"
+        "FWD/BWD = policy training (93% MFU, 13% of wall time)\n"
+        "SYNC = zero-copy GPU param copy (0.04% of wall time, was 20%)",
         transform=ax.transAxes, fontsize=9, verticalalignment="bottom",
         fontfamily="monospace",
         bbox=dict(boxstyle="round,pad=0.4", facecolor="#FFFFF0",
