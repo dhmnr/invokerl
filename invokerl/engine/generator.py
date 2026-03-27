@@ -265,6 +265,16 @@ class VLLMGenerator(BaseGenerator):
         else:
             self._sync_weights_safetensors(state_dict)
 
+    def get_model_params(self) -> dict[str, Tensor]:
+        """Return vLLM's model parameters as a {name: tensor} dict.
+
+        Used for shared-weight mode: PolicyModel's parameters are set to
+        views into these tensors so both models share the same GPU memory.
+        Only works with in-process engine (VLLM_ENABLE_V1_MULTIPROCESSING=0).
+        """
+        model = self._get_model()
+        return dict(model.named_parameters())
+
     # -- Weight sync strategies ------------------------------------------------
 
     def _detect_sync_strategy(self) -> str:

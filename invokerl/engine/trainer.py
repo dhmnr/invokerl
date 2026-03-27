@@ -111,6 +111,23 @@ class Trainer:
         self.dataset = dataset
         self.eval_dataset = eval_dataset
 
+        # Shared weights: make policy params point to vLLM's GPU memory.
+        # Must happen BEFORE optimizer creation so moment buffers are
+        # initialized on the shared storage.
+        self._weights_shared = False
+        if hasattr(generator, "get_model_params"):
+            try:
+                vllm_params = generator.get_model_params()
+                shared = policy.share_vllm_weights(vllm_params)
+                if shared > 0:
+                    self._weights_shared = True
+                    self._vllm_params = vllm_params  # prevent GC
+                    logger.info(
+                        "Shared weights enabled: update_weights() is a no-op"
+                    )
+            except Exception as e:
+                logger.warning("Shared weights setup failed: %s. Using copy sync.", e)
+
         # Optimizer
         self.optimizer = AdamW(
             self.policy.parameters(),
@@ -275,8 +292,19 @@ class Trainer:
         self.scheduler.step()
         self.optimizer.zero_grad()
 
-        # Sync updated weights to generation engine
-        self.generator.update_weights(self.policy.get_state_dict())
+        if self._weights_shared:
+            # Shared weights mode: optimizer updated params in-place,
+            # vLLM already sees the new values. Just ensure writes are visible.
+            torch.cuda.synchronize()
+
+            # Verify sharing is intact after first step (catches silent copies)
+            if self.step == 0 and hasattr(self, "_vllm_params"):
+                if not self.policy.verify_shared_weights(self._vllm_params):
+                    logger.warning("Shared weights broken — falling back to copy sync")
+                    self._weights_shared = False
+        else:
+            # Copy-based sync (fallback)
+            self.generator.update_weights(self.policy.get_state_dict())
 
         # Free training tensors (activations, gradients) before generation
         # reclaims GPU memory so vLLM doesn't OOM on the next rollout
