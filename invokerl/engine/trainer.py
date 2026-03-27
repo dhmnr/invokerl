@@ -477,8 +477,7 @@ class Trainer:
         if resume_from:
             start_step = self.load_checkpoint(resume_from)
             logger.info(f"Resumed from step {start_step}")
-            # Sync loaded weights to generator
-            self.generator.update_weights(self.policy.get_state_dict())
+            # load_checkpoint() handles weight sync internally
 
         # Baseline eval
         logger.info("Running baseline evaluation...")
