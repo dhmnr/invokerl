@@ -425,7 +425,12 @@ class Trainer:
         )
         self.policy.model.train()
 
-        # Re-establish shared weights with vLLM if possible.
+        # Copy checkpoint weights to vLLM FIRST (vLLM still has old weights).
+        # Must happen before share_vllm_weights() — otherwise sharing would
+        # point policy back at vLLM's stale pre-checkpoint tensors.
+        self.generator.update_weights(self.policy.get_state_dict())
+
+        # Re-establish shared weights with vLLM (both now have checkpoint data).
         if hasattr(self, "_vllm_params"):
             try:
                 vllm_params = self.generator.get_model_params()
@@ -443,10 +448,6 @@ class Trainer:
             lr=self.config.lr,
             weight_decay=self.config.weight_decay,
         )
-
-        # Sync weights to vLLM (needed if sharing failed)
-        if not self._weights_shared:
-            self.generator.update_weights(self.policy.get_state_dict())
 
         # Load training state
         state_path = os.path.join(ckpt_dir, "training_state.pt")
