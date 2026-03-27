@@ -163,7 +163,7 @@ def plot_memory_profile(output_path: str):
 
 
 def main():
-    output_path = Path(__file__).parent.parent / "results" / "memory_profile.png"
+    output_path = Path(__file__).parent.parent / "results" / "v2" / "memory_profile.png"
     plot_memory_profile(str(output_path))
 
 

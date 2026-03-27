@@ -229,8 +229,8 @@ def plot_gpu_utilization(
 
 
 def main():
-    profile_path = Path(__file__).parent.parent / "results" / "profile" / "profile_summary.json"
-    output_path = Path(__file__).parent.parent / "results" / "gpu_utilization_3steps.png"
+    profile_path = Path(__file__).parent.parent / "results" / "v1" / "profile" / "profile_summary.json"
+    output_path = Path(__file__).parent.parent / "results" / "v2" / "gpu_utilization_3steps.png"
 
     data = load_profile_data(str(profile_path))
     np.random.seed(42)
