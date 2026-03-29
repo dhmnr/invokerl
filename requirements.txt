@@ -1,4 +1,8 @@
-cuda-tile
-cupy-cuda13x
-numpy
-safetensors
+datasets>=2.14
+matplotlib>=3.7
+numpy>=1.24
+pyyaml>=6.0
+safetensors>=0.4
+torch>=2.4
+transformers>=4.45
+vllm>=0.18,<0.19
