@@ -1,0 +1,54 @@
+# Batch scaling sweep: measure T_gen vs T_train at different B×G
+# Run each config for 3 steps to get stable timing
+#
+# Crossover prediction (RTX 5090, C≈27):
+#   B×G=4  → T_gen ≈ 7× T_train
+#   B×G=16 → T_gen ≈ 1.7× T_train
+#   B×G=32 → T_gen ≈ T_train  (crossover)
+#   B×G=64 → T_train > T_gen  (train-bound)
+#
+# Usage:
+#   Override batch_size and group_size via CLI or edit directly.
+#   Bump gpu_memory_utilization for larger batches (more KV cache needed).
+#
+# Sweep configs:
+#   B=1, G=4  (B×G=4)   — gpu_mem=0.3  ← baseline
+#   B=4, G=4  (B×G=16)  — gpu_mem=0.4
+#   B=8, G=4  (B×G=32)  — gpu_mem=0.5
+#   B=16, G=4 (B×G=64)  — gpu_mem=0.6, may need --no-ref
+
+model:
+  name_or_path: Qwen/Qwen3-0.6B
+  dtype: bfloat16
+
+algorithm:
+  name: grpo
+  clip_eps: 0.2
+  beta: 0.04
+
+training:
+  total_steps: 3
+  lr: 1.0e-5
+  weight_decay: 0.01
+  grad_clip: 1.0
+  warmup_steps: 0
+  accumulation_steps: 1    # 1 micro-batch for clean timing
+  batch_size: 8            # prompts per micro-batch (SWEEP THIS: 1, 4, 8, 16)
+  group_size: 4            # completions per prompt
+
+generation:
+  max_new_tokens: 512
+  max_model_len: 2048
+  temperature: 0.9
+  top_k: 50
+  gpu_memory_utilization: 0.5  # INCREASE THIS for larger batches
+
+reward:
+  type: rule
+  dataset: gsm8k
+
+logging:
+  log_every: 1
+  eval_every: 0            # skip eval for timing sweep
+  save_every: 0
+  output_dir: ./checkpoints/sweep_batch_scaling
