@@ -113,6 +113,8 @@ class Trainer:
         )
         self.history: list[dict] = []
         self.step = 0
+        self._weight_version = 0  # incremented each optimizer step
+        self._disagg_mode = False  # set True by train_disagg(); skips auto weight sync
         Path(config.output_dir).mkdir(parents=True, exist_ok=True)
 
     def _make_lr_lambda(self):
@@ -168,6 +170,7 @@ class Trainer:
             ref_log_probs=ref_log_probs,
             group_ids=group_ids,
             group_size=G,
+            weight_version=self._weight_version,
         )
 
     # -- Training step ---------------------------------------------------------
@@ -196,6 +199,7 @@ class Trainer:
             ref_log_probs=batch.ref_log_probs.to(dev),
             group_ids=batch.group_ids.to(dev) if batch.group_ids is not None else None,
             group_size=batch.group_size,
+            weight_version=batch.weight_version,
             extras=batch.extras,
         )
 
@@ -210,15 +214,19 @@ class Trainer:
         self.scheduler.step()
         self.optimizer.zero_grad()
 
-        if self._weights_shared:
-            torch.cuda.synchronize()
-            # Verify sharing is intact after first step
-            if self.step == 0 and hasattr(self, "_vllm_params"):
-                if not self.policy.verify_shared_weights(self._vllm_params):
-                    logger.warning("Shared weights broken -- falling back to copy sync")
-                    self._weights_shared = False
-        else:
-            self.generator.update_weights(self.policy.get_state_dict())
+        # In disagg mode, the pipeline handles weight sync on its own schedule.
+        if not self._disagg_mode:
+            if self._weights_shared:
+                torch.cuda.synchronize()
+                # Verify sharing is intact after first step
+                if self.step == 0 and hasattr(self, "_vllm_params"):
+                    if not self.policy.verify_shared_weights(self._vllm_params):
+                        logger.warning("Shared weights broken -- falling back to copy sync")
+                        self._weights_shared = False
+            else:
+                self.generator.update_weights(self.policy.get_state_dict())
+
+        self._weight_version += 1
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -265,6 +273,7 @@ class Trainer:
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict(),
             "history": self.history,
+            "weight_version": self._weight_version,
         }, os.path.join(ckpt_dir, "training_state.pt"))
 
         logger.info("Checkpoint saved: %s", ckpt_dir)
@@ -317,6 +326,7 @@ class Trainer:
             self.optimizer.load_state_dict(state["optimizer"])
             self.scheduler.load_state_dict(state["scheduler"])
             self.history = state.get("history", [])
+            self._weight_version = state.get("weight_version", 0)
             return state["step"]
         return 0
 
@@ -350,9 +360,11 @@ class Trainer:
             accumulated_metrics: dict[str, list[float]] = {}
             self.optimizer.zero_grad()
 
+            staleness_values: list[int] = []
             for _ in range(cfg.accumulation_steps):
                 prompts = self.dataset.sample(cfg.batch_size)
                 batch = self.rollout(prompts)
+                staleness_values.append(self._weight_version - batch.weight_version)
                 loss, metrics = self.train_step(batch)
 
                 del batch, loss
@@ -366,8 +378,15 @@ class Trainer:
             dt = time.time() - t0
 
             step_metrics = {k: sum(v) / len(v) for k, v in accumulated_metrics.items()}
-            step_metrics.update({"step": step, "grad_norm": grad_norm,
-                                 "lr": self.scheduler.get_last_lr()[0], "time": dt})
+            avg_staleness = sum(staleness_values) / len(staleness_values) if staleness_values else 0.0
+            max_staleness = max(staleness_values) if staleness_values else 0
+            step_metrics.update({
+                "step": step, "grad_norm": grad_norm,
+                "lr": self.scheduler.get_last_lr()[0], "time": dt,
+                "staleness": avg_staleness,
+                "staleness_max": max_staleness,
+                "weight_version": self._weight_version,
+            })
 
             self.algorithm.on_step_end(step, step_metrics)
             self.history.append(step_metrics)
@@ -391,6 +410,139 @@ class Trainer:
                 self.save_checkpoint(step + 1)
 
         # Final eval + checkpoint
+        final_eval = self.evaluate()
+        if final_eval:
+            logger.info("Final: %d/%d = %.1f%%",
+                        final_eval["eval_correct"], final_eval["eval_total"],
+                        final_eval["eval_accuracy"] * 100)
+
+        self.save_checkpoint(cfg.total_steps)
+
+        with open(os.path.join(cfg.output_dir, "training_history.json"), "w") as f:
+            json.dump(self.history, f, indent=2)
+
+        return self.history
+
+    # -- Disaggregated training loop -------------------------------------------
+
+    def train_disagg(
+        self,
+        pipeline,  # DisaggPipeline — imported lazily to avoid circular deps
+        resume_from: str | None = None,
+    ) -> list[dict]:
+        """Train using the async disaggregated pipeline.
+
+        Generation runs in a background thread on a separate GPU.
+        This method consumes pre-generated batches from the pipeline queue,
+        trains, and periodically syncs weights back to the generation engine.
+        """
+        cfg = self.config
+        start_step = 0
+
+        # Tell optimizer_step() to skip auto weight sync — pipeline handles it.
+        self._disagg_mode = True
+
+        if resume_from:
+            start_step = self.load_checkpoint(resume_from)
+            logger.info("Resumed from step %d (disagg mode)", start_step)
+
+        # Start the async generation thread.
+        pipeline.start(initial_state_dict=self.policy.get_state_dict())
+
+        # Baseline eval (uses the generator, so must happen after pipeline start
+        # or before — we do a quick sync to make sure weights are current).
+        eval_metrics = self.evaluate()
+        if eval_metrics:
+            logger.info("Baseline: %d/%d = %.1f%%",
+                        eval_metrics["eval_correct"], eval_metrics["eval_total"],
+                        eval_metrics["eval_accuracy"] * 100)
+
+        logger.info("Starting disagg training: %d steps, accum=%d, group_size=%d, "
+                    "sync_every=%d, buffer=%d",
+                    cfg.total_steps, cfg.accumulation_steps, cfg.group_size,
+                    pipeline.config.sync_every, pipeline.config.buffer_size)
+
+        try:
+            for step in range(start_step, cfg.total_steps):
+                t0 = time.time()
+                self.step = step
+                self.algorithm.on_step_start(step)
+
+                accumulated_metrics: dict[str, list[float]] = {}
+                self.optimizer.zero_grad()
+
+                staleness_values: list[int] = []
+                for _ in range(cfg.accumulation_steps):
+                    batch = pipeline.get_batch()
+                    if batch is None:
+                        pipeline.check_health()
+                        logger.error("Pipeline returned None at step %d", step)
+                        break
+
+                    staleness = pipeline.weight_version - batch.weight_version
+                    staleness_values.append(staleness)
+                    loss, metrics = self.train_step(batch)
+
+                    del batch, loss
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+                    for k, v in metrics.items():
+                        accumulated_metrics.setdefault(k, []).append(v)
+
+                grad_norm = self.optimizer_step()
+                pipeline.step_version()
+
+                # Periodic weight sync.
+                sync_ms = 0.0
+                if pipeline.should_sync():
+                    sync_ms = pipeline.sync_weights(self.policy.get_state_dict())
+
+                dt = time.time() - t0
+
+                step_metrics = {k: sum(v) / len(v) for k, v in accumulated_metrics.items()}
+                avg_staleness = sum(staleness_values) / len(staleness_values) if staleness_values else 0.0
+                max_staleness = max(staleness_values) if staleness_values else 0
+                # Use pipeline.weight_version as single source of truth.
+                wv = pipeline.weight_version
+                step_metrics.update({
+                    "step": step, "grad_norm": grad_norm,
+                    "lr": self.scheduler.get_last_lr()[0], "time": dt,
+                    "staleness": avg_staleness,
+                    "staleness_max": max_staleness,
+                    "weight_version": wv,
+                    "sync_ms": sync_ms,
+                    "queue_size": pipeline._queue.qsize(),
+                })
+
+                self.algorithm.on_step_end(step, step_metrics)
+                self.history.append(step_metrics)
+
+                if step % cfg.log_every == 0 or step == start_step:
+                    logger.info(
+                        "[step %4d] loss=%.4f reward=%.3f kl=%.4f gnorm=%.2f "
+                        "lr=%.2e time=%.1fs stale=%.1f sync=%.0fms q=%d",
+                        step, step_metrics.get("loss", 0), step_metrics.get("reward", 0),
+                        step_metrics.get("kl", 0), grad_norm, step_metrics["lr"],
+                        dt, avg_staleness, sync_ms, pipeline._queue.qsize(),
+                    )
+
+                if cfg.eval_every > 0 and (step + 1) % cfg.eval_every == 0:
+                    eval_metrics = self.evaluate()
+                    if eval_metrics:
+                        logger.info("--- Eval step %d: %d/%d = %.1f%%",
+                                    step + 1, eval_metrics["eval_correct"],
+                                    eval_metrics["eval_total"], eval_metrics["eval_accuracy"] * 100)
+                        step_metrics.update(eval_metrics)
+
+                if cfg.save_every > 0 and (step + 1) % cfg.save_every == 0:
+                    self.save_checkpoint(step + 1)
+
+        finally:
+            pipeline_stats = pipeline.stop()
+            logger.info("Pipeline stats: %s", pipeline_stats)
+
+        # Final eval + checkpoint.
         final_eval = self.evaluate()
         if final_eval:
             logger.info("Final: %d/%d = %.1f%%",

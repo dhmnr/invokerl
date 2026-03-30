@@ -54,6 +54,12 @@ class RolloutBatch:
     group_ids: Tensor | None        # [B] int — which prompt each completion belongs to
     group_size: int = 1             # number of completions per prompt
 
+    # Off-policy tracking: which weight version generated this batch.
+    # staleness = current_weight_version - weight_version.
+    # In synchronous mode this is always 0. In async pipelines it tracks
+    # how many optimizer steps have happened since generation.
+    weight_version: int = 0
+
     # Optional extras (value predictions, etc.)
     extras: dict[str, Any] = field(default_factory=dict)
 

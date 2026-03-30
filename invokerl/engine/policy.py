@@ -106,6 +106,17 @@ class PolicyModel:
             logger.warning("Cannot share weights in fp32 mode — dtype mismatch")
             return 0
 
+        # Can't share across devices (disaggregated mode).
+        if vllm_params:
+            vllm_device = next(iter(vllm_params.values())).device
+            policy_device = next(self.model.parameters()).device
+            if vllm_device != policy_device:
+                logger.info(
+                    "Cross-device: weight sharing disabled (vllm=%s, policy=%s)",
+                    vllm_device, policy_device,
+                )
+                return 0
+
         policy_params = dict(self.model.named_parameters())
         shared = 0
 

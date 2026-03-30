@@ -195,6 +195,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-train-samples", type=int, default=None, help="Limit training dataset size")
     p.add_argument("--seed", type=int, default=42, help="Random seed")
     p.add_argument("--verbose", action="store_true", help="Debug logging")
+
+    # Disaggregated pipeline (2+ GPUs).
+    p.add_argument("--disagg", action="store_true",
+                   help="Run generation and training on separate GPUs")
+    p.add_argument("--gen-device", type=str, default="cuda:0",
+                   help="GPU for vLLM generation (default: cuda:0)")
+    p.add_argument("--train-device", type=str, default="cuda:1",
+                   help="GPU for policy training (default: cuda:1)")
+    p.add_argument("--sync-every", type=int, default=1,
+                   help="Sync weights to gen every N optimizer steps (default: 1)")
+    p.add_argument("--buffer-size", type=int, default=2,
+                   help="Max rollout batches in queue (default: 2)")
+    p.add_argument("--max-staleness", type=int, default=0,
+                   help="Drop batches staler than this (0 = no limit)")
     return p.parse_args()
 
 
@@ -220,6 +234,10 @@ def main() -> None:
                 trainer_config.total_steps, trainer_config.lr,
                 trainer_config.accumulation_steps, trainer_config.group_size)
 
+    if args.disagg:
+        logger.info("Disaggregated mode: gen=%s, train=%s, sync_every=%d, buffer=%d",
+                    args.gen_device, args.train_device, args.sync_every, args.buffer_size)
+
     # Build components
     algorithm = build_algorithm(cfg)
     train_dataset = build_dataset(cfg, split="train", max_samples=args.max_train_samples or 0)
@@ -227,6 +245,10 @@ def main() -> None:
     reward_fn = build_reward(cfg)
 
     logger.info("Datasets: %d train, %d eval", len(train_dataset), len(eval_dataset))
+
+    # In disagg mode, vLLM runs on gen_device, policy on train_device.
+    gen_device = args.gen_device if args.disagg else "cuda"
+    train_device = args.train_device if args.disagg else "cuda"
 
     logger.info("Initializing vLLM generator...")
     generator = build_generator(cfg, trainer_config)
@@ -236,13 +258,13 @@ def main() -> None:
         torch.cuda.manual_seed_all(args.seed)
 
     logger.info("Loading policy model...")
-    policy = build_policy(cfg)
+    policy = build_policy(cfg, device=train_device)
 
     if args.no_ref:
         ref_policy = None
         logger.info("Reference model skipped (--no-ref)")
     else:
-        ref_policy = build_ref_policy(cfg)
+        ref_policy = build_ref_policy(cfg, device=gen_device if args.disagg else "cuda")
         if ref_policy is None:
             logger.info("Algorithm %s doesn't need a reference model", trainer_config.algorithm)
 
@@ -267,7 +289,34 @@ def main() -> None:
                         metrics["eval_accuracy"] * 100)
         return
 
-    history = trainer.train(resume_from=args.resume)
+    if args.disagg:
+        from invokerl.engine.generator import GenerationConfig
+        from invokerl.engine.pipeline import DisaggPipeline, PipelineConfig
+
+        pipeline = DisaggPipeline(
+            config=PipelineConfig(
+                gen_device=args.gen_device,
+                train_device=args.train_device,
+                sync_every=args.sync_every,
+                buffer_size=args.buffer_size,
+                max_staleness=args.max_staleness,
+            ),
+            generator=generator,
+            ref_policy=ref_policy,
+            reward_fn=reward_fn,
+            dataset=train_dataset,
+            gen_config=GenerationConfig(
+                max_new_tokens=trainer_config.max_new_tokens,
+                temperature=trainer_config.temperature,
+                top_k=trainer_config.top_k,
+            ),
+            batch_size=trainer_config.batch_size,
+            group_size=trainer_config.group_size,
+        )
+        history = trainer.train_disagg(pipeline, resume_from=args.resume)
+    else:
+        history = trainer.train(resume_from=args.resume)
+
     logger.info("Training complete. %d steps recorded.", len(history))
 
 
