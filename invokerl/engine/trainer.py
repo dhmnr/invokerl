@@ -1,28 +1,19 @@
-"""Main training loop — orchestrates generation, reward, loss, and optimization.
+"""Training loop -- orchestrates generation, reward, loss, and optimization.
 
-This is the glue between the algorithm (hackable) and the infrastructure
-(generator, policy model, optimizer). Researchers don't modify this file.
-
-Training step:
-    1. Sample prompts from dataset
-    2. Generate completions via vLLM (→ token_ids, old_log_probs)
-    3. Score completions with reward function (→ rewards)
-    4. Compute reference log-probs (→ ref_log_probs)
-    5. Build RolloutBatch
-    6. Call algorithm.compute_advantages(batch) (→ advantages)
-    7. Forward pass through policy model (→ new_log_probs, with gradients)
-    8. Call algorithm.compute_loss(new_log_probs, batch, advantages) (→ loss)
-    9. loss.backward() + optimizer.step()
-    10. Sync weights to generation engine
+Step: sample prompts -> generate completions (vLLM) -> score rewards ->
+compute ref log-probs -> advantages -> forward -> loss -> backward -> step -> sync.
 """
 
 from __future__ import annotations
 
+import glob as glob_mod
 import json
 import logging
+import math
 import os
+import shutil
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -38,34 +29,26 @@ from invokerl.rewards.base import BaseReward
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class TrainerConfig:
     """Training hyperparameters."""
 
-    # Model
     model_name_or_path: str = ""
-
-    # Algorithm (set by config file)
     algorithm: str = "grpo"
 
-    # Training
+    # Optimization
     total_steps: int = 200
     lr: float = 1e-6
     weight_decay: float = 0.01
     grad_clip: float = 1.0
     warmup_steps: int = 50
-    lr_schedule: str = "constant"   # "constant" or "cosine" (after warmup)
-    lr_end: float = 0.0             # final LR for cosine schedule (default: 0)
-    accumulation_steps: int = 4     # micro-batches per optimizer step
+    lr_schedule: str = "constant"       # "constant" or "cosine"
+    lr_end: float = 0.0
+    accumulation_steps: int = 4
 
     # Generation
-    batch_size: int = 4             # prompts per micro-batch
-    group_size: int = 4             # completions per prompt
+    batch_size: int = 4
+    group_size: int = 4
     max_new_tokens: int = 384
     temperature: float = 0.9
     top_k: int = 50
@@ -75,21 +58,12 @@ class TrainerConfig:
     eval_every: int = 50
     save_every: int = 100
     eval_samples: int = 50
-    max_checkpoints: int = 2          # keep only the N most recent checkpoints
+    max_checkpoints: int = 2
     output_dir: str = "./checkpoints"
 
 
-# ---------------------------------------------------------------------------
-# Trainer
-# ---------------------------------------------------------------------------
-
-
 class Trainer:
-    """Main training loop.
-
-    Orchestrates: generate → reward → forward → loss → backward → step → sync.
-    The algorithm controls only compute_advantages() and compute_loss().
-    """
+    """Orchestrates: generate -> reward -> forward -> loss -> backward -> step -> sync."""
 
     def __init__(
         self,
@@ -111,9 +85,9 @@ class Trainer:
         self.dataset = dataset
         self.eval_dataset = eval_dataset
 
-        # Shared weights: make policy params point to vLLM's GPU memory.
-        # Must happen BEFORE optimizer creation so moment buffers are
-        # initialized on the shared storage.
+        # Shared weights: policy params point to vLLM's GPU memory.
+        # Must happen BEFORE optimizer creation so moment buffers
+        # are initialized on the shared storage.
         self._weights_shared = False
         if hasattr(generator, "get_model_params"):
             try:
@@ -122,96 +96,65 @@ class Trainer:
                 if shared > 0:
                     self._weights_shared = True
                     self._vllm_params = vllm_params  # prevent GC
-                    logger.info(
-                        "Shared weights enabled: update_weights() is a no-op"
-                    )
+                    logger.info("Shared weights enabled: update_weights() is a no-op")
             except Exception as e:
                 logger.warning("Shared weights setup failed: %s. Using copy sync.", e)
 
-        # Optimizer
         self.optimizer = AdamW(
-            self.policy.parameters(),
-            lr=config.lr,
-            weight_decay=config.weight_decay,
+            self.policy.parameters(), lr=config.lr, weight_decay=config.weight_decay,
         )
-
-        # LR scheduler: linear warmup, then constant or cosine decay
-        import math
-        _warmup = config.warmup_steps
-        _total = config.total_steps
-        _schedule = config.lr_schedule
-        _lr_min_ratio = config.lr_end / config.lr if config.lr > 0 else 0.0
-
-        def lr_lambda(step: int) -> float:
-            if step < _warmup:
-                return (step + 1) / _warmup
-            if _schedule == "cosine":
-                progress = (step - _warmup) / max(1, _total - _warmup)
-                progress = min(progress, 1.0)
-                return _lr_min_ratio + (1.0 - _lr_min_ratio) * 0.5 * (
-                    1.0 + math.cos(math.pi * progress)
-                )
-            return 1.0  # constant
-
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(
-            self.optimizer, lr_lambda
+            self.optimizer, self._make_lr_lambda(),
         )
-
-        # Generation config
         self.gen_config = GenerationConfig(
             max_new_tokens=config.max_new_tokens,
             temperature=config.temperature,
             top_k=config.top_k,
         )
-
-        # History
         self.history: list[dict] = []
         self.step = 0
-
-        # Output directory
         Path(config.output_dir).mkdir(parents=True, exist_ok=True)
 
-    # ----- Rollout phase (no gradients) ------------------------------------
+    def _make_lr_lambda(self):
+        """Build LR schedule: linear warmup then constant or cosine decay."""
+        warmup = self.config.warmup_steps
+        total = self.config.total_steps
+        schedule = self.config.lr_schedule
+        min_ratio = self.config.lr_end / self.config.lr if self.config.lr > 0 else 0.0
+
+        def lr_lambda(step: int) -> float:
+            if step < warmup:
+                return (step + 1) / warmup
+            if schedule == "cosine":
+                progress = min((step - warmup) / max(1, total - warmup), 1.0)
+                return min_ratio + (1.0 - min_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
+            return 1.0
+
+        return lr_lambda
+
+    # -- Rollout (no gradients) ------------------------------------------------
 
     @torch.no_grad()
     def rollout(self, prompts: list[PromptItem]) -> RolloutBatch:
-        """Generate completions, score rewards, compute ref log-probs.
+        """Generate completions, score rewards, compute ref log-probs."""
+        B, G = len(prompts), self.config.group_size
 
-        Args:
-            prompts: Sampled prompt items (one per prompt in the batch).
-
-        Returns:
-            RolloutBatch ready for the algorithm.
-        """
-        cfg = self.config
-        B = len(prompts)
-        G = cfg.group_size
-
-        # Expand prompts: each prompt gets G completions
         expanded_prompts = [p.prompt for p in prompts for _ in range(G)]
         expanded_truths = [p.ground_truth for p in prompts for _ in range(G)]
 
-        # Generate completions + old_log_probs
         gen_out = self.generator.generate(expanded_prompts, self.gen_config)
 
-        # Score rewards
         rewards = self.reward_fn.score_batch(
-            expanded_prompts,
-            gen_out.texts,
-            ground_truths=expanded_truths,
-        )
-        rewards = rewards.to(gen_out.token_ids.device)
+            expanded_prompts, gen_out.texts, ground_truths=expanded_truths,
+        ).to(gen_out.token_ids.device)
 
-        # Reference log-probs
         if self.ref_policy is not None:
             ref_log_probs = self.ref_policy.forward_no_grad(
                 gen_out.token_ids, gen_out.attention_mask,
             )
         else:
-            # If no ref model, use old_log_probs (degrades to no KL penalty)
             ref_log_probs = gen_out.log_probs.clone()
 
-        # Group IDs: prompt i → completions [i*G, ..., (i+1)*G - 1]
         group_ids = torch.arange(B, device=gen_out.token_ids.device).repeat_interleave(G)
 
         return RolloutBatch(
@@ -227,10 +170,20 @@ class Trainer:
             group_size=G,
         )
 
-    # ----- Training step ---------------------------------------------------
+    # -- Training step ---------------------------------------------------------
+
+    def train_step(self, batch: RolloutBatch) -> tuple[Tensor, dict[str, float]]:
+        """One micro-batch: advantages -> forward -> loss -> backward."""
+        batch = self._batch_to_device(batch)
+        advantages = self.algorithm.compute_advantages(batch)
+        new_log_probs = self.policy.forward(batch.token_ids, batch.attention_mask)
+        loss, metrics = self.algorithm.compute_loss(new_log_probs, batch, advantages)
+
+        (loss / self.config.accumulation_steps).backward()
+        return loss, metrics
 
     def _batch_to_device(self, batch: RolloutBatch) -> RolloutBatch:
-        """Move all batch tensors to the policy model's device."""
+        """Move batch tensors to the policy model's device."""
         dev = self.policy.device
         return RolloutBatch(
             token_ids=batch.token_ids.to(dev),
@@ -246,45 +199,10 @@ class Trainer:
             extras=batch.extras,
         )
 
-    def train_step(self, batch: RolloutBatch) -> tuple[Tensor, dict[str, float]]:
-        """Run one micro-batch: advantages → forward → loss.
-
-        Args:
-            batch: RolloutBatch from rollout().
-
-        Returns:
-            (loss, metrics) — loss has gradients, metrics are detached floats.
-        """
-        # Move batch to training device (generator returns CPU tensors)
-        batch = self._batch_to_device(batch)
-
-        # Compute advantages (algorithm-defined credit assignment)
-        advantages = self.algorithm.compute_advantages(batch)
-
-        # Forward pass through current policy (with gradients)
-        new_log_probs = self.policy.forward(
-            batch.token_ids, batch.attention_mask,
-        )
-
-        # Compute loss (algorithm-defined objective)
-        loss, metrics = self.algorithm.compute_loss(
-            new_log_probs, batch, advantages,
-        )
-
-        # Scale loss by accumulation steps before backward
-        scaled_loss = loss / self.config.accumulation_steps
-        scaled_loss.backward()
-
-        return loss, metrics
-
-    # ----- Optimizer step --------------------------------------------------
+    # -- Optimizer step --------------------------------------------------------
 
     def optimizer_step(self) -> float:
-        """Clip gradients, step optimizer, update LR, sync weights.
-
-        Returns:
-            grad_norm: Global gradient norm before clipping.
-        """
+        """Clip gradients, step optimizer, sync weights. Returns grad norm."""
         grad_norm = torch.nn.utils.clip_grad_norm_(
             self.policy.parameters(), self.config.grad_clip,
         )
@@ -293,163 +211,106 @@ class Trainer:
         self.optimizer.zero_grad()
 
         if self._weights_shared:
-            # Shared weights mode: optimizer updated params in-place,
-            # vLLM already sees the new values. Just ensure writes are visible.
             torch.cuda.synchronize()
-
-            # Verify sharing is intact after first step (catches silent copies)
+            # Verify sharing is intact after first step
             if self.step == 0 and hasattr(self, "_vllm_params"):
                 if not self.policy.verify_shared_weights(self._vllm_params):
-                    logger.warning("Shared weights broken — falling back to copy sync")
+                    logger.warning("Shared weights broken -- falling back to copy sync")
                     self._weights_shared = False
         else:
-            # Copy-based sync (fallback)
             self.generator.update_weights(self.policy.get_state_dict())
 
-        # Free training tensors (activations, gradients) before generation
-        # reclaims GPU memory so vLLM doesn't OOM on the next rollout
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
         return float(grad_norm)
 
-    # ----- Evaluation ------------------------------------------------------
+    # -- Evaluation ------------------------------------------------------------
 
     @torch.no_grad()
     def evaluate(self, max_samples: int | None = None) -> dict[str, float]:
-        """Evaluate current policy on the eval dataset.
-
-        Generates one completion per problem (greedy), checks answer.
-
-        Returns:
-            Dict with "eval_accuracy", "eval_n", etc.
-        """
+        """Evaluate current policy (greedy decoding)."""
         if self.eval_dataset is None:
             return {}
-
         n = max_samples or self.config.eval_samples
         if n <= 0:
             return {}
 
         items = self.eval_dataset.items[:n]
-        prompts = [item.prompt for item in items]
-        truths = [item.ground_truth for item in items]
-
-        # Greedy generation for eval
         eval_config = GenerationConfig(
-            max_new_tokens=self.config.max_new_tokens,
-            temperature=0.0,  # greedy
-            top_k=1,
+            max_new_tokens=self.config.max_new_tokens, temperature=0.0, top_k=1,
         )
-        gen_out = self.generator.generate(prompts, eval_config)
-
-        # Score
+        gen_out = self.generator.generate([i.prompt for i in items], eval_config)
         rewards = self.reward_fn.score_batch(
-            prompts, gen_out.texts, ground_truths=truths,
+            [i.prompt for i in items], gen_out.texts,
+            ground_truths=[i.ground_truth for i in items],
         )
-        accuracy = float(rewards.mean())
-        correct = int(rewards.sum())
-
         return {
-            "eval_accuracy": accuracy,
-            "eval_correct": correct,
+            "eval_accuracy": float(rewards.mean()),
+            "eval_correct": int(rewards.sum()),
             "eval_total": n,
         }
 
-    # ----- Checkpointing ---------------------------------------------------
+    # -- Checkpointing ---------------------------------------------------------
 
     def save_checkpoint(self, step: int) -> str:
-        """Save model checkpoint and training state.
-
-        Returns:
-            Path to the saved checkpoint directory.
-        """
         ckpt_dir = os.path.join(self.config.output_dir, f"step_{step}")
         os.makedirs(ckpt_dir, exist_ok=True)
 
-        # Save model weights
         self.policy.model.save_pretrained(ckpt_dir)
         self.policy.tokenizer.save_pretrained(ckpt_dir)
 
-        # Save training state
-        state = {
+        torch.save({
             "step": step,
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict(),
             "history": self.history,
-        }
-        torch.save(state, os.path.join(ckpt_dir, "training_state.pt"))
+        }, os.path.join(ckpt_dir, "training_state.pt"))
 
-        logger.info(f"Checkpoint saved to {ckpt_dir}")
-
-        # Remove old checkpoints if we exceed max_checkpoints
+        logger.info("Checkpoint saved: %s", ckpt_dir)
         self._cleanup_old_checkpoints()
-
         return ckpt_dir
 
     def _cleanup_old_checkpoints(self) -> None:
-        """Remove oldest checkpoints if we exceed max_checkpoints."""
-        import glob as glob_mod
-        max_keep = self.config.max_checkpoints
-        if max_keep <= 0:
+        if self.config.max_checkpoints <= 0:
             return
-
         pattern = os.path.join(self.config.output_dir, "step_*")
         ckpt_dirs = sorted(
             glob_mod.glob(pattern),
             key=lambda d: int(os.path.basename(d).split("_")[1]),
         )
-
-        while len(ckpt_dirs) > max_keep:
-            oldest = ckpt_dirs.pop(0)
-            import shutil
-            shutil.rmtree(oldest, ignore_errors=True)
-            logger.info(f"Removed old checkpoint: {oldest}")
+        while len(ckpt_dirs) > self.config.max_checkpoints:
+            shutil.rmtree(ckpt_dirs.pop(0), ignore_errors=True)
 
     def load_checkpoint(self, ckpt_dir: str) -> int:
-        """Load model and training state from checkpoint.
-
-        Returns:
-            The step number to resume from.
-        """
-        # Loading a checkpoint replaces the model — shared weights are broken.
+        """Load checkpoint. Returns step number to resume from."""
         self._weights_shared = False
 
-        # Load model weights
         from transformers import AutoModelForCausalLM
         self.policy.model = AutoModelForCausalLM.from_pretrained(
-            ckpt_dir,
-            dtype=self.policy.dtype,
-            device_map=self.policy.device,
-            attn_implementation="sdpa",
+            ckpt_dir, dtype=self.policy.dtype,
+            device_map=self.policy.device, attn_implementation="sdpa",
         )
         self.policy.model.train()
 
-        # Copy checkpoint weights to vLLM FIRST (vLLM still has old weights).
-        # Must happen before share_vllm_weights() — otherwise sharing would
-        # point policy back at vLLM's stale pre-checkpoint tensors.
+        # Sync checkpoint weights to vLLM before re-sharing
         self.generator.update_weights(self.policy.get_state_dict())
 
-        # Re-establish shared weights with vLLM (both now have checkpoint data).
         if hasattr(self, "_vllm_params"):
             try:
                 vllm_params = self.generator.get_model_params()
-                shared = self.policy.share_vllm_weights(vllm_params)
-                if shared > 0:
+                if self.policy.share_vllm_weights(vllm_params) > 0:
                     self._weights_shared = True
                     self._vllm_params = vllm_params
                     logger.info("Re-established shared weights after checkpoint load")
             except Exception as e:
                 logger.warning("Could not re-share weights after resume: %s", e)
 
-        # Reinitialize optimizer with new parameters (after sharing)
         self.optimizer = AdamW(
-            self.policy.parameters(),
-            lr=self.config.lr,
+            self.policy.parameters(), lr=self.config.lr,
             weight_decay=self.config.weight_decay,
         )
 
-        # Load training state
         state_path = os.path.join(ckpt_dir, "training_state.pt")
         if os.path.exists(state_path):
             state = torch.load(state_path, map_location=self.policy.device)
@@ -457,131 +318,88 @@ class Trainer:
             self.scheduler.load_state_dict(state["scheduler"])
             self.history = state.get("history", [])
             return state["step"]
-
         return 0
 
-    # ----- Main loop -------------------------------------------------------
+    # -- Main loop -------------------------------------------------------------
 
     def train(self, resume_from: str | None = None) -> list[dict]:
-        """Run the full training loop.
-
-        Args:
-            resume_from: Optional checkpoint directory to resume from.
-
-        Returns:
-            Training history (list of per-step metric dicts).
-        """
+        """Run the full training loop."""
         cfg = self.config
         start_step = 0
 
         if resume_from:
             start_step = self.load_checkpoint(resume_from)
-            logger.info(f"Resumed from step {start_step}")
-            # load_checkpoint() handles weight sync internally
+            logger.info("Resumed from step %d", start_step)
+            self.generator.update_weights(self.policy.get_state_dict())
 
         # Baseline eval
-        logger.info("Running baseline evaluation...")
         eval_metrics = self.evaluate()
         if eval_metrics:
-            logger.info(
-                f"Baseline: {eval_metrics['eval_correct']}/{eval_metrics['eval_total']} "
-                f"= {eval_metrics['eval_accuracy']:.1%}"
-            )
+            logger.info("Baseline: %d/%d = %.1f%%",
+                        eval_metrics["eval_correct"], eval_metrics["eval_total"],
+                        eval_metrics["eval_accuracy"] * 100)
 
-        # Training
-        logger.info(
-            f"Starting training: {cfg.total_steps} steps, "
-            f"accum={cfg.accumulation_steps}, group_size={cfg.group_size}"
-        )
+        logger.info("Starting training: %d steps, accum=%d, group_size=%d",
+                    cfg.total_steps, cfg.accumulation_steps, cfg.group_size)
 
-        end_step = cfg.total_steps  # total_steps is the absolute target
-        for step in range(start_step, end_step):
+        for step in range(start_step, cfg.total_steps):
             t0 = time.time()
             self.step = step
             self.algorithm.on_step_start(step)
 
-            # Gradient accumulation over K micro-batches
             accumulated_metrics: dict[str, list[float]] = {}
             self.optimizer.zero_grad()
 
-            for micro in range(cfg.accumulation_steps):
-                # Sample prompts and generate rollouts
+            for _ in range(cfg.accumulation_steps):
                 prompts = self.dataset.sample(cfg.batch_size)
                 batch = self.rollout(prompts)
-
-                # Forward + loss + backward (gradients accumulate)
                 loss, metrics = self.train_step(batch)
 
-                # Free intermediate tensors between micro-batches
-                # (activations from backward, batch tensors)
                 del batch, loss
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
-                # Accumulate metrics
                 for k, v in metrics.items():
                     accumulated_metrics.setdefault(k, []).append(v)
 
-            # Optimizer step (clip + step + sync weights)
             grad_norm = self.optimizer_step()
-
             dt = time.time() - t0
 
-            # Aggregate metrics
-            step_metrics = {
-                k: sum(v) / len(v) for k, v in accumulated_metrics.items()
-            }
-            step_metrics.update({
-                "step": step,
-                "grad_norm": grad_norm,
-                "lr": self.scheduler.get_last_lr()[0],
-                "time": dt,
-            })
+            step_metrics = {k: sum(v) / len(v) for k, v in accumulated_metrics.items()}
+            step_metrics.update({"step": step, "grad_norm": grad_norm,
+                                 "lr": self.scheduler.get_last_lr()[0], "time": dt})
 
             self.algorithm.on_step_end(step, step_metrics)
             self.history.append(step_metrics)
 
-            # Logging
             if step % cfg.log_every == 0 or step == start_step:
-                reward_str = f"reward={step_metrics.get('reward', 0):.3f}"
-                kl_str = f"kl={step_metrics.get('kl', 0):.4f}"
                 logger.info(
-                    f"[step {step:>4d}] loss={step_metrics.get('loss', 0):.4f} "
-                    f"{reward_str} {kl_str} "
-                    f"gnorm={grad_norm:.2f} lr={step_metrics['lr']:.2e} "
-                    f"time={dt:.1f}s"
+                    "[step %4d] loss=%.4f reward=%.3f kl=%.4f gnorm=%.2f lr=%.2e time=%.1fs",
+                    step, step_metrics.get("loss", 0), step_metrics.get("reward", 0),
+                    step_metrics.get("kl", 0), grad_norm, step_metrics["lr"], dt,
                 )
 
-            # Evaluation
             if cfg.eval_every > 0 and (step + 1) % cfg.eval_every == 0:
                 eval_metrics = self.evaluate()
                 if eval_metrics:
-                    logger.info(
-                        f"--- Eval at step {step + 1}: "
-                        f"{eval_metrics['eval_correct']}/{eval_metrics['eval_total']} "
-                        f"= {eval_metrics['eval_accuracy']:.1%}"
-                    )
+                    logger.info("--- Eval step %d: %d/%d = %.1f%%",
+                                step + 1, eval_metrics["eval_correct"],
+                                eval_metrics["eval_total"], eval_metrics["eval_accuracy"] * 100)
                     step_metrics.update(eval_metrics)
 
-            # Checkpoint
             if cfg.save_every > 0 and (step + 1) % cfg.save_every == 0:
                 self.save_checkpoint(step + 1)
 
-        # Final eval
-        logger.info("Running final evaluation...")
+        # Final eval + checkpoint
         final_eval = self.evaluate()
         if final_eval:
-            logger.info(
-                f"Final: {final_eval['eval_correct']}/{final_eval['eval_total']} "
-                f"= {final_eval['eval_accuracy']:.1%}"
-            )
+            logger.info("Final: %d/%d = %.1f%%",
+                        final_eval["eval_correct"], final_eval["eval_total"],
+                        final_eval["eval_accuracy"] * 100)
 
-        # Save final checkpoint
-        self.save_checkpoint(end_step)
+        self.save_checkpoint(cfg.total_steps)
 
-        # Save history
-        history_path = os.path.join(cfg.output_dir, "training_history.json")
-        with open(history_path, "w") as f:
+        with open(os.path.join(cfg.output_dir, "training_history.json"), "w") as f:
             json.dump(self.history, f, indent=2)
 
         return self.history
