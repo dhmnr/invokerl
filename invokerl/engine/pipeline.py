@@ -91,8 +91,16 @@ class DisaggPipeline:
         self._gen_version = 0
         self._version_lock = threading.Lock()
 
-        # Sync lock: held during weight update to prevent concurrent generation.
-        self._sync_lock = threading.Lock()
+        # vLLM lock: serializes all vLLM access (generate + evaluate).
+        # The gen thread holds this during generate(); the training thread
+        # acquires it for mid-training evaluate() calls.
+        self._vllm_lock = threading.Lock()
+
+        # Non-blocking weight sync: training thread posts state_dict here,
+        # gen thread applies it between generation calls.
+        self._pending_sync: dict[str, Tensor] | None = None
+        self._pending_sync_lock = threading.Lock()
+        self._last_sync_ms: float = 0.0
 
         # Lifecycle control.
         self._stop = threading.Event()
@@ -110,9 +118,17 @@ class DisaggPipeline:
     # -- Generation thread -----------------------------------------------------
 
     def _gen_loop(self) -> None:
-        """Background loop: generate rollouts until stopped."""
+        """Background loop: generate rollouts until stopped.
+
+        Between generation calls, applies any pending weight sync posted by
+        the training thread. This avoids lock contention — the gen thread is
+        the only one touching vLLM, so no concurrent access issues.
+        """
         try:
             while not self._stop.is_set():
+                # Apply pending weight sync between generations (~50ms when pending).
+                self._apply_pending_sync()
+
                 with self._version_lock:
                     version = self._gen_version
 
@@ -124,6 +140,8 @@ class DisaggPipeline:
                         self._queue.put(batch, timeout=0.5)
                         break
                     except queue.Full:
+                        # Check for pending sync while waiting on full queue too.
+                        self._apply_pending_sync()
                         continue
 
                 self.batches_generated += 1
@@ -131,6 +149,29 @@ class DisaggPipeline:
             logger.error("Generation thread failed: %s", e, exc_info=True)
             self._gen_error = e
             self._queue.put(None)  # unblock training thread
+
+    def _apply_pending_sync(self) -> None:
+        """Apply any pending weight sync. Called by gen thread between generations."""
+        with self._pending_sync_lock:
+            state_dict = self._pending_sync
+            self._pending_sync = None
+
+        if state_dict is None:
+            return
+
+        t0 = time.perf_counter()
+        # Hold vllm_lock to prevent concurrent evaluate() during the brief copy.
+        with self._vllm_lock:
+            self.generator.update_weights(state_dict)
+        with self._version_lock:
+            self._gen_version = self._weight_version
+        dt_ms = (time.perf_counter() - t0) * 1000
+        self.syncs_done += 1
+        self._last_sync_ms = dt_ms
+        logger.debug(
+            "Weight sync #%d: %.1fms (version %d → gen)",
+            self.syncs_done, dt_ms, self._gen_version,
+        )
 
     @torch.no_grad()
     def _generate_one(self, weight_version: int) -> RolloutBatch:
@@ -141,8 +182,8 @@ class DisaggPipeline:
         expanded_prompts = [p.prompt for p in prompts for _ in range(G)]
         expanded_truths = [p.ground_truth for p in prompts for _ in range(G)]
 
-        # Hold sync lock so we don't generate while weights are being updated.
-        with self._sync_lock:
+        # Hold vllm_lock during generate() to serialize with evaluate().
+        with self._vllm_lock:
             gen_out = self.generator.generate(expanded_prompts, self.gen_config)
 
         rewards = self.reward_fn.score_batch(
@@ -211,26 +252,37 @@ class DisaggPipeline:
     # -- Weight sync -----------------------------------------------------------
 
     def sync_weights(self, state_dict: dict[str, Tensor]) -> float:
-        """Copy policy weights to vLLM. Returns sync time in ms.
+        """Request async weight sync. Non-blocking — returns immediately.
 
-        The caller (Trainer) provides the state_dict so we don't need
-        a reference to the policy model.
+        The gen thread applies the sync between generation calls (~50ms).
+        Returns 0.0 since the actual sync happens asynchronously.
+        Use `last_sync_ms` to check the actual time of the most recent sync.
+
+        The state_dict is cloned to prevent races with the next optimizer step.
         """
+        with self._pending_sync_lock:
+            self._pending_sync = {k: v.detach().clone() for k, v in state_dict.items()}
+        return 0.0
+
+    def sync_weights_blocking(self, state_dict: dict[str, Tensor]) -> float:
+        """Synchronous weight sync (used before pipeline starts). Returns ms."""
         t0 = time.perf_counter()
-
-        with self._sync_lock:
-            self.generator.update_weights(state_dict)
-
+        self.generator.update_weights(state_dict)
         with self._version_lock:
             self._gen_version = self._weight_version
-
         dt_ms = (time.perf_counter() - t0) * 1000
         self.syncs_done += 1
+        self._last_sync_ms = dt_ms
         logger.debug(
             "Weight sync #%d: %.1fms (version %d → gen)",
             self.syncs_done, dt_ms, self._weight_version,
         )
         return dt_ms
+
+    @property
+    def last_sync_ms(self) -> float:
+        """Actual time of the most recent sync (set by gen thread)."""
+        return self._last_sync_ms
 
     def step_version(self) -> int:
         """Increment weight version after an optimizer step. Returns new version."""
@@ -259,7 +311,7 @@ class DisaggPipeline:
             raise RuntimeError("Pipeline already running")
 
         if initial_state_dict is not None:
-            self.sync_weights(initial_state_dict)
+            self.sync_weights_blocking(initial_state_dict)
 
         self._stop.clear()
         self._gen_thread = threading.Thread(

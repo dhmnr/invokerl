@@ -30,7 +30,6 @@ class GenerationConfig:
     # vLLM-specific
     gpu_memory_utilization: float = 0.5   # leave room for training
     enforce_eager: bool = False           # disable CUDA graphs for debugging
-    attention_backend: str | None = None  # "FLASHINFER", "FLASH_ATTN", etc. None=auto
 
 
 @dataclass
@@ -77,19 +76,10 @@ class VLLMGenerator(BaseGenerator):
         dtype: str = "bfloat16",
         seed: int = 42,
         max_model_len: int | None = None,
-        attention_backend: str | None = None,
     ):
         from vllm import LLM
 
-        # Auto-detect: use FlashInfer on Blackwell+ (sm_120) where vLLM's
-        # bundled FlashAttention2 CUDA kernels have PTX compatibility issues.
-        if attention_backend is None and torch.cuda.is_available():
-            cc = torch.cuda.get_device_capability()
-            if cc[0] >= 12:  # Blackwell (sm_120) or newer
-                attention_backend = "FLASHINFER"
-                logger.info("Auto-selected FLASHINFER backend for sm_%d%d", cc[0], cc[1])
-
-        llm_kwargs: dict = dict(
+        self.llm = LLM(
             model=model_name_or_path,
             gpu_memory_utilization=gpu_memory_utilization,
             enforce_eager=enforce_eager,
@@ -98,10 +88,6 @@ class VLLMGenerator(BaseGenerator):
             max_model_len=max_model_len,
             enable_prefix_caching=True,  # reuse prompt KV cache for GRPO groups
         )
-        if attention_backend is not None:
-            llm_kwargs["attention_backend"] = attention_backend
-
-        self.llm = LLM(**llm_kwargs)
         # Store dtype for weight sync casting (fp32 master weights → bf16 vLLM)
         _dtype_map = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
         self._model_dtype = _dtype_map.get(dtype, torch.bfloat16)
@@ -211,22 +197,65 @@ class VLLMGenerator(BaseGenerator):
         return "safetensors"
 
     def _sync_weights_direct(self, state_dict: dict[str, Tensor]) -> None:
-        """Direct GPU→GPU copy into vLLM's in-process model. ~2ms for 0.6B."""
+        """Direct GPU→GPU copy into vLLM's in-process model. ~50ms for 0.6B.
+
+        Handles vLLM's fused layers: qkv_proj (from q/k/v_proj) and
+        gate_up_proj (from gate/up_proj). Iterates vLLM's param names
+        and assembles fused tensors from the policy state_dict.
+        """
         model = self._get_model()
         vllm_params = dict(model.named_parameters())
+        synced = 0
 
-        for name, new_tensor in state_dict.items():
-            if name in vllm_params:
-                vllm_params[name].data.copy_(
-                    new_tensor.to(
-                        dtype=self._model_dtype,
-                        device=vllm_params[name].device,
-                        non_blocking=True,
-                    )
-                )
+        for vname, vparam in vllm_params.items():
+            src = self._resolve_policy_tensor(vname, state_dict)
+            if src is None:
+                continue
+            vparam.data.copy_(
+                src.to(dtype=self._model_dtype, device=vparam.device, non_blocking=True)
+            )
+            synced += 1
 
         torch.cuda.synchronize()
-        logger.debug("Weight sync: direct GPU copy complete")
+        logger.debug("Weight sync: direct GPU copy complete (%d/%d params)", synced, len(vllm_params))
+
+    @staticmethod
+    def _resolve_policy_tensor(
+        vllm_name: str,
+        state_dict: dict[str, Tensor],
+    ) -> Tensor | None:
+        """Map a vLLM param name to the corresponding policy tensor(s).
+
+        Handles fused layers by assembling from component parts:
+          qkv_proj.weight ← cat([q_proj, k_proj, v_proj], dim=0)
+          gate_up_proj.weight ← cat([gate_proj, up_proj], dim=0)
+        """
+        # Direct match (norms, o_proj, down_proj, embeddings, etc.)
+        if vllm_name in state_dict:
+            return state_dict[vllm_name]
+
+        # Fused QKV: vLLM's qkv_proj ← policy's q_proj + k_proj + v_proj
+        if ".qkv_proj." in vllm_name:
+            q_name = vllm_name.replace(".qkv_proj.", ".q_proj.")
+            k_name = vllm_name.replace(".qkv_proj.", ".k_proj.")
+            v_name = vllm_name.replace(".qkv_proj.", ".v_proj.")
+            if q_name in state_dict and k_name in state_dict and v_name in state_dict:
+                return torch.cat(
+                    [state_dict[q_name], state_dict[k_name], state_dict[v_name]], dim=0,
+                )
+            return None
+
+        # Fused gate_up: vLLM's gate_up_proj ← policy's gate_proj + up_proj
+        if ".gate_up_proj." in vllm_name:
+            gate_name = vllm_name.replace(".gate_up_proj.", ".gate_proj.")
+            up_name = vllm_name.replace(".gate_up_proj.", ".up_proj.")
+            if gate_name in state_dict and up_name in state_dict:
+                return torch.cat(
+                    [state_dict[gate_name], state_dict[up_name]], dim=0,
+                )
+            return None
+
+        return None
 
     def _sync_weights_safetensors(self, state_dict: dict[str, Tensor]) -> None:
         """Fallback: serialize to safetensors via tmpfs or disk."""

@@ -492,10 +492,11 @@ class Trainer:
                 grad_norm = self.optimizer_step()
                 pipeline.step_version()
 
-                # Periodic weight sync.
+                # Periodic weight sync (non-blocking — gen thread applies it).
                 sync_ms = 0.0
                 if pipeline.should_sync():
-                    sync_ms = pipeline.sync_weights(self.policy.get_state_dict())
+                    pipeline.sync_weights(self.policy.get_state_dict())
+                    sync_ms = pipeline.last_sync_ms  # from previous sync
 
                 dt = time.time() - t0
 
@@ -527,9 +528,9 @@ class Trainer:
                     )
 
                 if cfg.eval_every > 0 and (step + 1) % cfg.eval_every == 0:
-                    # Hold sync lock during eval to prevent concurrent vLLM access
+                    # Hold vLLM lock during eval to prevent concurrent vLLM access
                     # (vLLM's LLM class is not thread-safe).
-                    with pipeline._sync_lock:
+                    with pipeline._vllm_lock:
                         eval_metrics = self.evaluate()
                     if eval_metrics:
                         logger.info("--- Eval step %d: %d/%d = %.1f%%",

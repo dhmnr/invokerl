@@ -128,7 +128,6 @@ def build_generator(cfg: dict, trainer_config: TrainerConfig):
         enforce_eager=gen_cfg.get("enforce_eager", False),
         dtype=model_cfg.get("dtype", "bfloat16"),
         max_model_len=gen_cfg.get("max_model_len", None),
-        attention_backend=gen_cfg.get("attention_backend", None),
     )
 
 
