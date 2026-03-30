@@ -28,6 +28,5 @@ build-backend = "hatchling.build"
 packages = ["invokerl"]
 
 [tool.uv]
-# Use CUDA 12.8 wheels for Blackwell (sm_120) GPU support.
-# Set UV_TORCH_BACKEND=cu128 when running `uv sync` on Blackwell machines.
-torch-backend = "cu128"
+# Use CUDA 13.0 wheels for Blackwell (sm_120) GPU support.
+torch-backend = "cu130"
