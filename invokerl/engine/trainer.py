@@ -471,8 +471,11 @@ class Trainer:
                 self.optimizer.zero_grad()
 
                 staleness_values: list[int] = []
+                t_wait, t_train = 0.0, 0.0
                 for _ in range(cfg.accumulation_steps):
+                    tw0 = time.time()
                     batch = pipeline.get_batch()
+                    t_wait += time.time() - tw0
                     if batch is None:
                         pipeline.check_health()
                         logger.error("Pipeline returned None at step %d", step)
@@ -480,7 +483,9 @@ class Trainer:
 
                     staleness = pipeline.weight_version - batch.weight_version
                     staleness_values.append(staleness)
+                    tt0 = time.time()
                     loss, metrics = self.train_step(batch)
+                    t_train += time.time() - tt0
 
                     del batch, loss
                     if torch.cuda.is_available():
@@ -489,7 +494,9 @@ class Trainer:
                     for k, v in metrics.items():
                         accumulated_metrics.setdefault(k, []).append(v)
 
+                to0 = time.time()
                 grad_norm = self.optimizer_step()
+                t_optim = time.time() - to0
                 pipeline.step_version()
 
                 # Periodic weight sync (non-blocking — gen thread applies it).
@@ -513,6 +520,9 @@ class Trainer:
                     "weight_version": wv,
                     "sync_ms": sync_ms,
                     "queue_size": pipeline._queue.qsize(),
+                    "t_wait": t_wait,
+                    "t_train": t_train,
+                    "t_optim": t_optim,
                 })
 
                 self.algorithm.on_step_end(step, step_metrics)
@@ -521,10 +531,12 @@ class Trainer:
                 if step % cfg.log_every == 0 or step == start_step:
                     logger.info(
                         "[step %4d] loss=%.4f reward=%.3f kl=%.4f gnorm=%.2f "
-                        "lr=%.2e time=%.1fs stale=%.1f sync=%.0fms q=%d",
+                        "lr=%.2e time=%.1fs [wait=%.1fs train=%.1fs optim=%.1fs] "
+                        "stale=%.1f sync=%.0fms q=%d",
                         step, step_metrics.get("loss", 0), step_metrics.get("reward", 0),
                         step_metrics.get("kl", 0), grad_norm, step_metrics["lr"],
-                        dt, avg_staleness, sync_ms, pipeline._queue.qsize(),
+                        dt, t_wait, t_train, t_optim,
+                        avg_staleness, sync_ms, pipeline._queue.qsize(),
                     )
 
                 if cfg.eval_every > 0 and (step + 1) % cfg.eval_every == 0:

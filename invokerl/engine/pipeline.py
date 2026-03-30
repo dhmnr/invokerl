@@ -115,6 +115,11 @@ class DisaggPipeline:
         self._total_staleness = 0
         self._max_staleness = 0
 
+        # Phase timing (gen thread, cumulative).
+        self._t_generate = 0.0
+        self._t_reward = 0.0
+        self._t_ref = 0.0
+
     # -- Generation thread -----------------------------------------------------
 
     def _gen_loop(self) -> None:
@@ -183,19 +188,25 @@ class DisaggPipeline:
         expanded_truths = [p.ground_truth for p in prompts for _ in range(G)]
 
         # Hold vllm_lock during generate() to serialize with evaluate().
+        t0 = time.perf_counter()
         with self._vllm_lock:
             gen_out = self.generator.generate(expanded_prompts, self.gen_config)
+        self._t_generate += time.perf_counter() - t0
 
+        t0 = time.perf_counter()
         rewards = self.reward_fn.score_batch(
             expanded_prompts, gen_out.texts, ground_truths=expanded_truths,
         ).to(gen_out.token_ids.device)
+        self._t_reward += time.perf_counter() - t0
 
+        t0 = time.perf_counter()
         if self.ref_policy is not None:
             ref_log_probs = self.ref_policy.forward_no_grad(
                 gen_out.token_ids, gen_out.attention_mask,
             )
         else:
             ref_log_probs = gen_out.log_probs.clone()
+        self._t_ref += time.perf_counter() - t0
 
         group_ids = torch.arange(
             B, device=gen_out.token_ids.device,
@@ -343,6 +354,7 @@ class DisaggPipeline:
                 break
 
         avg_staleness = self._total_staleness / max(1, self.batches_consumed)
+        n = max(1, self.batches_generated)
         stats = {
             "batches_generated": self.batches_generated,
             "batches_consumed": self.batches_consumed,
@@ -350,6 +362,10 @@ class DisaggPipeline:
             "weight_syncs": self.syncs_done,
             "avg_staleness": avg_staleness,
             "max_staleness": self._max_staleness,
+            "gen_total_s": round(self._t_generate, 1),
+            "gen_avg_ms": round(self._t_generate / n * 1000, 1),
+            "reward_total_s": round(self._t_reward, 1),
+            "ref_total_s": round(self._t_ref, 1),
         }
 
         logger.info(
