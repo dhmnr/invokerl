@@ -446,16 +446,15 @@ class Trainer:
             start_step = self.load_checkpoint(resume_from)
             logger.info("Resumed from step %d (disagg mode)", start_step)
 
-        # Start the async generation thread.
-        pipeline.start(initial_state_dict=self.policy.get_state_dict())
-
-        # Baseline eval (uses the generator, so must happen after pipeline start
-        # or before — we do a quick sync to make sure weights are current).
+        # Baseline eval BEFORE starting gen thread — vLLM is not thread-safe.
         eval_metrics = self.evaluate()
         if eval_metrics:
             logger.info("Baseline: %d/%d = %.1f%%",
                         eval_metrics["eval_correct"], eval_metrics["eval_total"],
                         eval_metrics["eval_accuracy"] * 100)
+
+        # Start the async generation thread.
+        pipeline.start(initial_state_dict=self.policy.get_state_dict())
 
         logger.info("Starting disagg training: %d steps, accum=%d, group_size=%d, "
                     "sync_every=%d, buffer=%d",
@@ -528,7 +527,10 @@ class Trainer:
                     )
 
                 if cfg.eval_every > 0 and (step + 1) % cfg.eval_every == 0:
-                    eval_metrics = self.evaluate()
+                    # Hold sync lock during eval to prevent concurrent vLLM access
+                    # (vLLM's LLM class is not thread-safe).
+                    with pipeline._sync_lock:
+                        eval_metrics = self.evaluate()
                     if eval_metrics:
                         logger.info("--- Eval step %d: %d/%d = %.1f%%",
                                     step + 1, eval_metrics["eval_correct"],

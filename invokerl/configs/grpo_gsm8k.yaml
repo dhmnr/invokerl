@@ -24,6 +24,7 @@ generation:
   temperature: 0.9
   top_k: 50
   gpu_memory_utilization: 0.3    # leave 70% for bf16 policy + optimizer + ref model
+  enforce_eager: true            # required on Blackwell (sm_120) — torch.compile has issues
 
 reward:
   type: rule          # rule-based answer matching

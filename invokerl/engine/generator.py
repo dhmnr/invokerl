@@ -30,6 +30,7 @@ class GenerationConfig:
     # vLLM-specific
     gpu_memory_utilization: float = 0.5   # leave room for training
     enforce_eager: bool = False           # disable CUDA graphs for debugging
+    attention_backend: str | None = None  # "FLASHINFER", "FLASH_ATTN", etc. None=auto
 
 
 @dataclass
@@ -76,10 +77,19 @@ class VLLMGenerator(BaseGenerator):
         dtype: str = "bfloat16",
         seed: int = 42,
         max_model_len: int | None = None,
+        attention_backend: str | None = None,
     ):
         from vllm import LLM
 
-        self.llm = LLM(
+        # Auto-detect: use FlashInfer on Blackwell+ (sm_120) where vLLM's
+        # bundled FlashAttention2 CUDA kernels have PTX compatibility issues.
+        if attention_backend is None and torch.cuda.is_available():
+            cc = torch.cuda.get_device_capability()
+            if cc[0] >= 12:  # Blackwell (sm_120) or newer
+                attention_backend = "FLASHINFER"
+                logger.info("Auto-selected FLASHINFER backend for sm_%d%d", cc[0], cc[1])
+
+        llm_kwargs: dict = dict(
             model=model_name_or_path,
             gpu_memory_utilization=gpu_memory_utilization,
             enforce_eager=enforce_eager,
@@ -88,6 +98,10 @@ class VLLMGenerator(BaseGenerator):
             max_model_len=max_model_len,
             enable_prefix_caching=True,  # reuse prompt KV cache for GRPO groups
         )
+        if attention_backend is not None:
+            llm_kwargs["attention_backend"] = attention_backend
+
+        self.llm = LLM(**llm_kwargs)
         # Store dtype for weight sync casting (fp32 master weights → bf16 vLLM)
         _dtype_map = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
         self._model_dtype = _dtype_map.get(dtype, torch.bfloat16)
