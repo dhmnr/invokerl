@@ -197,65 +197,80 @@ class VLLMGenerator(BaseGenerator):
         return "safetensors"
 
     def _sync_weights_direct(self, state_dict: dict[str, Tensor]) -> None:
-        """Direct GPU→GPU copy into vLLM's in-process model. ~50ms for 0.6B.
+        """Direct GPU→GPU copy into vLLM's in-process model. ~100ms for 0.6B.
 
         Handles vLLM's fused layers: qkv_proj (from q/k/v_proj) and
-        gate_up_proj (from gate/up_proj). Iterates vLLM's param names
-        and assembles fused tensors from the policy state_dict.
+        gate_up_proj (from gate/up_proj). For fused layers, copies each
+        component directly into the correct slice of the existing vLLM
+        parameter buffer — no torch.cat, no GPU allocation, no CUDA graph
+        pool conflict.
         """
         model = self._get_model()
         vllm_params = dict(model.named_parameters())
         synced = 0
 
-        for vname, vparam in vllm_params.items():
-            src = self._resolve_policy_tensor(vname, state_dict)
-            if src is None:
-                continue
-            vparam.data.copy_(
-                src.to(dtype=self._model_dtype, device=vparam.device, non_blocking=True)
-            )
-            synced += 1
+        # Ensure any in-flight CUDA graph replays on the gen device complete
+        # before we write to vLLM's parameter buffers.
+        gen_device = next(iter(vllm_params.values())).device
+        torch.cuda.synchronize(gen_device)
 
-        torch.cuda.synchronize()
+        for vname, vparam in vllm_params.items():
+            synced += self._copy_policy_to_vllm(vname, vparam, state_dict)
+
+        torch.cuda.synchronize(gen_device)
         logger.debug("Weight sync: direct GPU copy complete (%d/%d params)", synced, len(vllm_params))
 
-    @staticmethod
-    def _resolve_policy_tensor(
+    def _copy_policy_to_vllm(
+        self,
         vllm_name: str,
+        vparam: Tensor,
         state_dict: dict[str, Tensor],
-    ) -> Tensor | None:
-        """Map a vLLM param name to the corresponding policy tensor(s).
+    ) -> int:
+        """Copy policy tensor(s) into a single vLLM parameter.
 
-        Handles fused layers by assembling from component parts:
-          qkv_proj.weight ← cat([q_proj, k_proj, v_proj], dim=0)
-          gate_up_proj.weight ← cat([gate_proj, up_proj], dim=0)
+        For fused layers (qkv_proj, gate_up_proj), copies each component
+        directly into the correct slice of the vLLM param buffer. This avoids
+        torch.cat allocations that conflict with vLLM's CUDA graph memory pool.
+
+        Returns 1 if the param was synced, 0 otherwise.
         """
+        dtype = self._model_dtype
+        device = vparam.device
+
         # Direct match (norms, o_proj, down_proj, embeddings, etc.)
         if vllm_name in state_dict:
-            return state_dict[vllm_name]
+            vparam.data.copy_(
+                state_dict[vllm_name].to(dtype=dtype, device=device, non_blocking=True)
+            )
+            return 1
 
-        # Fused QKV: vLLM's qkv_proj ← policy's q_proj + k_proj + v_proj
+        # Fused QKV: copy q, k, v into slices of qkv_proj
         if ".qkv_proj." in vllm_name:
             q_name = vllm_name.replace(".qkv_proj.", ".q_proj.")
             k_name = vllm_name.replace(".qkv_proj.", ".k_proj.")
             v_name = vllm_name.replace(".qkv_proj.", ".v_proj.")
             if q_name in state_dict and k_name in state_dict and v_name in state_dict:
-                return torch.cat(
-                    [state_dict[q_name], state_dict[k_name], state_dict[v_name]], dim=0,
-                )
-            return None
+                q, k, v = state_dict[q_name], state_dict[k_name], state_dict[v_name]
+                q_size, k_size = q.shape[0], k.shape[0]
+                vparam.data[:q_size].copy_(q.to(dtype=dtype, device=device, non_blocking=True))
+                vparam.data[q_size:q_size + k_size].copy_(k.to(dtype=dtype, device=device, non_blocking=True))
+                vparam.data[q_size + k_size:].copy_(v.to(dtype=dtype, device=device, non_blocking=True))
+                return 1
+            return 0
 
-        # Fused gate_up: vLLM's gate_up_proj ← policy's gate_proj + up_proj
+        # Fused gate_up: copy gate, up into slices of gate_up_proj
         if ".gate_up_proj." in vllm_name:
             gate_name = vllm_name.replace(".gate_up_proj.", ".gate_proj.")
             up_name = vllm_name.replace(".gate_up_proj.", ".up_proj.")
             if gate_name in state_dict and up_name in state_dict:
-                return torch.cat(
-                    [state_dict[gate_name], state_dict[up_name]], dim=0,
-                )
-            return None
+                gate, up = state_dict[gate_name], state_dict[up_name]
+                gate_size = gate.shape[0]
+                vparam.data[:gate_size].copy_(gate.to(dtype=dtype, device=device, non_blocking=True))
+                vparam.data[gate_size:].copy_(up.to(dtype=dtype, device=device, non_blocking=True))
+                return 1
+            return 0
 
-        return None
+        return 0
 
     def _sync_weights_safetensors(self, state_dict: dict[str, Tensor]) -> None:
         """Fallback: serialize to safetensors via tmpfs or disk."""
