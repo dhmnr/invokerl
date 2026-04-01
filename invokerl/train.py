@@ -215,6 +215,17 @@ def parse_args() -> argparse.Namespace:
                    help="Max rollout batches in queue (default: 2)")
     p.add_argument("--max-staleness", type=int, default=0,
                    help="Drop batches staler than this (0 = no limit)")
+
+    # FSDP distributed training (requires torchrun launcher).
+    p.add_argument("--fsdp", action="store_true",
+                   help="Enable FSDP distributed training (requires torchrun)")
+    p.add_argument("--train-device-start", type=int, default=1,
+                   help="First CUDA device index for training ranks (default: 1)")
+    p.add_argument("--fsdp-sharding", type=str, default="FULL_SHARD",
+                   choices=["FULL_SHARD", "SHARD_GRAD_OP", "NO_SHARD"],
+                   help="FSDP sharding strategy (default: FULL_SHARD)")
+    p.add_argument("--fsdp-cpu-offload", action="store_true",
+                   help="Offload FSDP params to CPU when not in use")
     return p.parse_args()
 
 
@@ -244,6 +255,16 @@ def main() -> None:
         logger.info("Disaggregated mode: gen=%s, train=%s, sync_every=%d, buffer=%d",
                     args.gen_device, args.train_device, args.sync_every, args.buffer_size)
 
+    # -- FSDP distributed setup ------------------------------------------------
+    fsdp_rank = 0
+    fsdp_world = 1
+    if args.fsdp:
+        from invokerl.engine.distributed import init_distributed
+        fsdp_rank = init_distributed()
+        fsdp_world = torch.distributed.get_world_size()
+        logger.info("FSDP: rank=%d, world=%d, sharding=%s",
+                    fsdp_rank, fsdp_world, args.fsdp_sharding)
+
     # Build components
     algorithm = build_algorithm(cfg)
     train_dataset = build_dataset(cfg, split="train", max_samples=args.max_train_samples or 0)
@@ -254,25 +275,46 @@ def main() -> None:
 
     # In disagg mode, vLLM runs on gen_device, policy on train_device.
     gen_device = args.gen_device if args.disagg else "cuda"
-    train_device = args.train_device if args.disagg else "cuda"
+    if args.fsdp:
+        # Each rank gets its own training GPU.
+        train_device = f"cuda:{args.train_device_start + fsdp_rank}"
+    else:
+        train_device = args.train_device if args.disagg else "cuda"
 
-    logger.info("Initializing vLLM generator...")
-    generator = build_generator(cfg, trainer_config)
+    # Only rank 0 initializes vLLM (gen runs on a separate GPU pool).
+    if fsdp_rank == 0:
+        logger.info("Initializing vLLM generator...")
+        generator = build_generator(cfg, trainer_config)
+    else:
+        generator = None  # Non-zero ranks don't run generation.
 
     # Now safe to seed CUDA (vLLM has already forked its engine)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
 
-    logger.info("Loading policy model...")
+    logger.info("Loading policy model on %s...", train_device)
     policy = build_policy(cfg, device=train_device)
+
+    # Wrap in FSDP before creating optimizer.
+    if args.fsdp:
+        device_id = args.train_device_start + fsdp_rank
+        policy.wrap_fsdp(
+            device_id=device_id,
+            sharding_strategy=args.fsdp_sharding,
+            cpu_offload=args.fsdp_cpu_offload,
+        )
 
     if args.no_ref:
         ref_policy = None
         logger.info("Reference model skipped (--no-ref)")
     else:
-        ref_policy = build_ref_policy(cfg, device=gen_device if args.disagg else "cuda")
-        if ref_policy is None:
-            logger.info("Algorithm %s doesn't need a reference model", trainer_config.algorithm)
+        # Only rank 0 loads ref policy (it's on the gen device).
+        if fsdp_rank == 0:
+            ref_policy = build_ref_policy(cfg, device=gen_device if args.disagg else "cuda")
+            if ref_policy is None:
+                logger.info("Algorithm %s doesn't need a reference model", trainer_config.algorithm)
+        else:
+            ref_policy = None
 
     trainer = Trainer(
         config=trainer_config,
@@ -288,38 +330,49 @@ def main() -> None:
     if args.eval_only:
         if args.resume:
             trainer.load_checkpoint(args.resume)
-        metrics = trainer.evaluate()
-        if metrics:
-            logger.info("Eval: %d/%d = %.1f%%",
-                        metrics["eval_correct"], metrics["eval_total"],
-                        metrics["eval_accuracy"] * 100)
+        if fsdp_rank == 0:
+            metrics = trainer.evaluate()
+            if metrics:
+                logger.info("Eval: %d/%d = %.1f%%",
+                            metrics["eval_correct"], metrics["eval_total"],
+                            metrics["eval_accuracy"] * 100)
         return
 
     if args.disagg:
         from invokerl.engine.generator import GenerationConfig
         from invokerl.engine.pipeline import DisaggPipeline, PipelineConfig
 
-        pipeline = DisaggPipeline(
-            config=PipelineConfig(
-                gen_device=args.gen_device,
-                train_device=args.train_device,
-                sync_every=args.sync_every,
-                buffer_size=args.buffer_size,
-                max_staleness=args.max_staleness,
-            ),
-            generator=generator,
-            ref_policy=ref_policy,
-            reward_fn=reward_fn,
-            dataset=train_dataset,
-            gen_config=GenerationConfig(
-                max_new_tokens=trainer_config.max_new_tokens,
-                temperature=trainer_config.temperature,
-                top_k=trainer_config.top_k,
-            ),
-            batch_size=trainer_config.batch_size,
-            group_size=trainer_config.group_size,
-        )
-        history = trainer.train_disagg(pipeline, resume_from=args.resume)
+        # Only rank 0 creates the pipeline. Other ranks pass None.
+        if fsdp_rank == 0:
+            pipeline = DisaggPipeline(
+                config=PipelineConfig(
+                    gen_device=args.gen_device,
+                    train_device=train_device,
+                    sync_every=args.sync_every,
+                    buffer_size=args.buffer_size,
+                    max_staleness=args.max_staleness,
+                ),
+                generator=generator,
+                ref_policy=ref_policy,
+                reward_fn=reward_fn,
+                dataset=train_dataset,
+                gen_config=GenerationConfig(
+                    max_new_tokens=trainer_config.max_new_tokens,
+                    temperature=trainer_config.temperature,
+                    top_k=trainer_config.top_k,
+                ),
+                batch_size=trainer_config.batch_size,
+                group_size=trainer_config.group_size,
+            )
+        else:
+            pipeline = None
+
+        if args.fsdp:
+            history = trainer.train_disagg_distributed(
+                pipeline, resume_from=args.resume,
+            )
+        else:
+            history = trainer.train_disagg(pipeline, resume_from=args.resume)
     else:
         history = trainer.train(resume_from=args.resume)
 

@@ -607,3 +607,218 @@ class Trainer:
             json.dump(self.history, f, indent=2)
 
         return self.history
+
+    # -- Distributed disaggregated training (FSDP) -----------------------------
+
+    def train_disagg_distributed(
+        self,
+        pipeline,  # DisaggPipeline — only on rank 0, None on other ranks
+        resume_from: str | None = None,
+    ) -> list[dict]:
+        """Train with FSDP across multiple GPUs + async disaggregated pipeline.
+
+        Only rank 0 runs the generation pipeline and broadcasts batches to
+        other ranks. All ranks participate in FSDP forward/backward/allreduce.
+        Only rank 0 syncs weights back to vLLM.
+
+        Launch via: torchrun --nproc_per_node=M -m invokerl.train --disagg --fsdp
+        """
+        from invokerl.engine.distributed import (
+            barrier,
+            broadcast_batch,
+            get_rank,
+            get_world_size,
+            is_main_rank,
+        )
+
+        cfg = self.config
+        rank = get_rank()
+        world_size = get_world_size()
+        start_step = 0
+
+        self._disagg_mode = True
+
+        if resume_from and is_main_rank():
+            start_step = self.load_checkpoint(resume_from)
+            logger.info("Resumed from step %d (distributed disagg, rank %d)", start_step, rank)
+
+        # Broadcast start_step from rank 0 so all ranks agree.
+        start_step_t = torch.tensor([start_step], device=self.policy.device)
+        torch.distributed.broadcast(start_step_t, src=0)
+        start_step = int(start_step_t.item())
+
+        # Baseline eval — only rank 0 (owns generator).
+        if is_main_rank():
+            eval_metrics = self.evaluate()
+            if eval_metrics:
+                logger.info("Baseline: %d/%d = %.1f%%",
+                            eval_metrics["eval_correct"], eval_metrics["eval_total"],
+                            eval_metrics["eval_accuracy"] * 100)
+
+        barrier()
+
+        # Start pipeline on rank 0 only.
+        if is_main_rank():
+            pipeline.start(initial_state_dict=self.policy.get_state_dict())
+            logger.info(
+                "Starting distributed disagg: %d steps, accum=%d, group=%d, "
+                "ranks=%d, sync_every=%d",
+                cfg.total_steps, cfg.accumulation_steps, cfg.group_size,
+                world_size, pipeline.config.sync_every,
+            )
+
+        barrier()
+
+        try:
+            for step in range(start_step, cfg.total_steps):
+                t0 = time.time()
+                self.step = step
+                self.algorithm.on_step_start(step)
+
+                accumulated_metrics: dict[str, list[float]] = {}
+                self.optimizer.zero_grad()
+
+                staleness_values: list[int] = []
+                t_wait, t_train, t_bcast = 0.0, 0.0, 0.0
+
+                for _ in range(cfg.accumulation_steps):
+                    # Rank 0: pull from pipeline. All ranks: broadcast.
+                    tw0 = time.time()
+                    if is_main_rank():
+                        batch = pipeline.get_batch()
+                        if batch is None:
+                            pipeline.check_health()
+                            logger.error("Pipeline returned None at step %d", step)
+                            break
+                        staleness = pipeline.weight_version - batch.weight_version
+                        staleness_values.append(staleness)
+                    else:
+                        batch = None
+                    t_wait += time.time() - tw0
+
+                    # Broadcast batch from rank 0 to all ranks.
+                    tb0 = time.time()
+                    batch = broadcast_batch(batch, src=0, device=self.policy.device)
+                    t_bcast += time.time() - tb0
+
+                    tt0 = time.time()
+                    loss, metrics = self.train_step(batch)
+                    t_train += time.time() - tt0
+
+                    del batch, loss
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
+                    for k, v in metrics.items():
+                        accumulated_metrics.setdefault(k, []).append(v)
+
+                to0 = time.time()
+                grad_norm = self.optimizer_step()
+                t_optim = time.time() - to0
+
+                # FSDP weight sync: all ranks must participate in the
+                # allgather even though only rank 0 uses the result.
+                # Rank 0 decides whether to sync, broadcasts the decision.
+                if is_main_rank():
+                    pipeline.step_version()
+                    should_sync = pipeline.should_sync()
+                    do_sync = torch.tensor(
+                        [1 if should_sync else 0], device=self.policy.device,
+                    )
+                else:
+                    do_sync = torch.tensor([0], device=self.policy.device)
+                torch.distributed.broadcast(do_sync, src=0)
+
+                sync_ms = 0.0
+                if do_sync.item():
+                    # All ranks participate in FSDP allgather.
+                    state_dict = self.policy.get_state_dict()
+                    if is_main_rank():
+                        pipeline.sync_weights(state_dict)
+                        sync_ms = pipeline.last_sync_ms
+
+                dt = time.time() - t0
+
+                # Logging and eval — rank 0 only.
+                if is_main_rank():
+                    step_metrics = {
+                        k: sum(v) / len(v)
+                        for k, v in accumulated_metrics.items()
+                    }
+                    avg_staleness = (
+                        sum(staleness_values) / len(staleness_values)
+                        if staleness_values else 0.0
+                    )
+                    max_staleness = (
+                        max(staleness_values) if staleness_values else 0
+                    )
+                    wv = pipeline.weight_version
+                    step_metrics.update({
+                        "step": step,
+                        "grad_norm": float(grad_norm),
+                        "lr": self.scheduler.get_last_lr()[0],
+                        "time": dt,
+                        "staleness": avg_staleness,
+                        "staleness_max": max_staleness,
+                        "weight_version": wv,
+                        "sync_ms": sync_ms,
+                        "queue_size": pipeline._queue.qsize(),
+                        "t_wait": t_wait,
+                        "t_train": t_train,
+                        "t_bcast": t_bcast,
+                        "t_optim": t_optim,
+                        "world_size": world_size,
+                    })
+
+                    self.algorithm.on_step_end(step, step_metrics)
+                    self.history.append(step_metrics)
+
+                    if step % cfg.log_every == 0 or step == start_step:
+                        logger.info(
+                            "[step %4d] loss=%.4f reward=%.3f gnorm=%.2f "
+                            "lr=%.2e time=%.1fs [wait=%.1fs train=%.1fs "
+                            "bcast=%.2fs optim=%.1fs] stale=%.1f q=%d",
+                            step, step_metrics.get("loss", 0),
+                            step_metrics.get("reward", 0), float(grad_norm),
+                            step_metrics["lr"], dt, t_wait, t_train,
+                            t_bcast, t_optim, avg_staleness,
+                            pipeline._queue.qsize(),
+                        )
+
+                    if cfg.eval_every > 0 and (step + 1) % cfg.eval_every == 0:
+                        with pipeline._vllm_lock:
+                            eval_metrics = self.evaluate()
+                        if eval_metrics:
+                            logger.info(
+                                "--- Eval step %d: %d/%d = %.1f%%",
+                                step + 1, eval_metrics["eval_correct"],
+                                eval_metrics["eval_total"],
+                                eval_metrics["eval_accuracy"] * 100,
+                            )
+                            step_metrics.update(eval_metrics)
+
+                    if cfg.save_every > 0 and (step + 1) % cfg.save_every == 0:
+                        with pipeline._vllm_lock:
+                            self.save_checkpoint(step + 1)
+
+                # All ranks sync at end of step.
+                barrier()
+
+        finally:
+            if is_main_rank():
+                pipeline_stats = pipeline.stop()
+                logger.info("Pipeline stats: %s", pipeline_stats)
+
+        if is_main_rank():
+            final_eval = self.evaluate()
+            if final_eval:
+                logger.info("Final: %d/%d = %.1f%%",
+                            final_eval["eval_correct"], final_eval["eval_total"],
+                            final_eval["eval_accuracy"] * 100)
+            self.save_checkpoint(cfg.total_steps)
+
+            with open(os.path.join(cfg.output_dir, "training_history.json"), "w") as f:
+                json.dump(self.history, f, indent=2)
+
+        barrier()
+        return self.history

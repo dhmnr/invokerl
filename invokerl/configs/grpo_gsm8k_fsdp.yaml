@@ -1,0 +1,50 @@
+# GRPO training on GSM8K — FSDP distributed + disaggregated pipeline
+# TP=1 gen on cuda:0, FSDP=2 train on cuda:1+cuda:2
+#
+# Usage (3 GPUs: 1 gen + 2 train):
+#   torchrun --nproc_per_node=2 -m invokerl.train \
+#     --config invokerl/configs/grpo_gsm8k_fsdp.yaml \
+#     --disagg --fsdp --gen-device cuda:0 --train-device-start 1
+#
+# Usage (4 GPUs: 1 gen + 3 train):
+#   torchrun --nproc_per_node=3 -m invokerl.train \
+#     --config invokerl/configs/grpo_gsm8k_fsdp.yaml \
+#     --disagg --fsdp --gen-device cuda:0 --train-device-start 1
+model:
+  name_or_path: Qwen/Qwen3-0.6B
+  dtype: bfloat16
+
+algorithm:
+  name: grpo
+  clip_eps: 0.2
+  beta: 0.04
+
+training:
+  total_steps: 1000
+  lr: 1.0e-5
+  weight_decay: 0.01
+  grad_clip: 1.0
+  warmup_steps: 50
+  lr_schedule: cosine
+  lr_end: 1.0e-6
+  accumulation_steps: 1
+  batch_size: 8
+  group_size: 4
+
+generation:
+  max_new_tokens: 512
+  max_model_len: 2048
+  temperature: 0.9
+  top_k: 50
+  gpu_memory_utilization: 0.3
+
+reward:
+  type: rule
+  dataset: gsm8k
+
+logging:
+  log_every: 10
+  eval_every: 100
+  save_every: 500
+  eval_samples: 200
+  output_dir: ./checkpoints/grpo_gsm8k_fsdp

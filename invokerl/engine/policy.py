@@ -31,6 +31,7 @@ class PolicyModel:
         self.device = device
         self.dtype = dtype
         self.master_weights_fp32 = master_weights_fp32
+        self._fsdp_wrapped = False
 
         load_dtype = torch.float32 if master_weights_fp32 else dtype
         self.model = AutoModelForCausalLM.from_pretrained(
@@ -177,10 +178,39 @@ class PolicyModel:
         return self.forward(token_ids, attention_mask)
 
     def get_state_dict(self) -> dict[str, Tensor]:
+        """Get model state dict. FSDP-aware: gathers full state on rank 0."""
+        if self._fsdp_wrapped:
+            from invokerl.engine.distributed import get_full_state_dict
+            return get_full_state_dict(self.model)
         return self.model.state_dict()
 
     def parameters(self):
         return self.model.parameters()
+
+    # -- FSDP support ----------------------------------------------------------
+
+    def wrap_fsdp(self, device_id: int | torch.device, **kwargs) -> None:
+        """Wrap the model in FSDP for distributed training.
+
+        Must be called BEFORE creating the optimizer. After wrapping,
+        get_state_dict() returns the full (unsharded) state dict on rank 0
+        (empty dict on other ranks).
+
+        Args:
+            device_id: CUDA device for this rank.
+            **kwargs: Extra args passed to wrap_model_fsdp().
+        """
+        from invokerl.engine.distributed import wrap_model_fsdp
+
+        self.model = wrap_model_fsdp(
+            self.model,
+            device_id=device_id,
+            mixed_precision_dtype=self.dtype,
+            **kwargs,
+        )
+        self._fsdp_wrapped = True
+        self.device = f"cuda:{device_id}" if isinstance(device_id, int) else str(device_id)
+        logger.info("PolicyModel FSDP-wrapped on device %s", self.device)
 
     # -- Shared weights with vLLM ---------------------------------------------
 
