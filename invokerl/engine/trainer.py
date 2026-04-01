@@ -267,23 +267,32 @@ class Trainer:
         All CUDA tensors are copied to CPU before serialization to avoid
         conflicts with vLLM's CUDA graph memory pool. Without this, torch.save
         can trigger cudaErrorLaunchFailure when CUDA graphs are active.
-        """
-        ckpt_dir = os.path.join(self.config.output_dir, f"step_{step}")
-        os.makedirs(ckpt_dir, exist_ok=True)
 
+        IMPORTANT: With FSDP, ALL ranks must call this method because
+        get_state_dict() does an allgather collective. Only rank 0 writes
+        files to disk (non-rank-0 gets an empty state_dict from
+        get_full_state_dict with rank0_only=True).
+        """
         # Synchronize the training device to flush pending CUDA ops before
         # reading GPU tensors. Only sync the train device — never the gen
         # device from this thread (disrupts vLLM's CUDA graph pool).
         train_device = next(self.policy.model.parameters()).device
         torch.cuda.synchronize(train_device)
 
-        # Save model weights via CPU state_dict to avoid GPU tensor serialization
-        # that can conflict with CUDA graph memory pools.
-        # Use policy.get_state_dict() which is FSDP-aware — returns the full
-        # (unsharded) state dict on rank 0 when FSDP is active.
-        cpu_state_dict = {
-            k: v.cpu() for k, v in self.policy.get_state_dict().items()
-        }
+        # get_state_dict() is an FSDP collective — all ranks must participate.
+        # rank 0 gets the full state dict; other ranks get empty dict.
+        state_dict = self.policy.get_state_dict()
+
+        # Only rank 0 (or non-distributed) writes to disk.
+        from invokerl.engine.distributed import is_main_rank
+        if not is_main_rank():
+            return ""
+
+        ckpt_dir = os.path.join(self.config.output_dir, f"step_{step}")
+        os.makedirs(ckpt_dir, exist_ok=True)
+
+        cpu_state_dict = {k: v.cpu() for k, v in state_dict.items()}
+        del state_dict
         self.policy.model.save_pretrained(ckpt_dir, state_dict=cpu_state_dict)
         del cpu_state_dict
         self.policy.tokenizer.save_pretrained(ckpt_dir)
@@ -805,9 +814,15 @@ class Trainer:
                             )
                             step_metrics.update(eval_metrics)
 
-                    if cfg.save_every > 0 and (step + 1) % cfg.save_every == 0:
+                # save_checkpoint() calls get_state_dict() which is an FSDP
+                # collective — ALL ranks must participate. Moved outside
+                # is_main_rank() guard to prevent allgather deadlock.
+                if cfg.save_every > 0 and (step + 1) % cfg.save_every == 0:
+                    if pipeline is not None:
                         with pipeline._vllm_lock:
                             self.save_checkpoint(step + 1)
+                    else:
+                        self.save_checkpoint(step + 1)
 
                 # All ranks sync at end of step.
                 barrier()
@@ -823,8 +838,12 @@ class Trainer:
                 logger.info("Final: %d/%d = %.1f%%",
                             final_eval["eval_correct"], final_eval["eval_total"],
                             final_eval["eval_accuracy"] * 100)
-            self.save_checkpoint(cfg.total_steps)
 
+        # save_checkpoint() calls get_state_dict() which is an FSDP collective —
+        # ALL ranks must participate. Only rank 0 writes files to disk.
+        self.save_checkpoint(cfg.total_steps)
+
+        if is_main_rank():
             with open(os.path.join(cfg.output_dir, "training_history.json"), "w") as f:
                 json.dump(self.history, f, indent=2)
 

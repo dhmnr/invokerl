@@ -423,6 +423,25 @@ def main() -> None:
 
     logger.info("Training complete. %d steps recorded.", len(history))
 
+    # -- Cleanup: explicit teardown to avoid hangs on exit ----------------------
+    # Without this, Python's atexit/GC may hang trying to tear down FSDP process
+    # groups or vLLM EngineCore subprocesses in the wrong order.
+    if args.fsdp and torch.distributed.is_initialized():
+        torch.distributed.barrier()
+        torch.distributed.destroy_process_group()
+        logger.info("Distributed process group destroyed.")
+
+    # Shut down vLLM EngineCore subprocess (if multiprocessing mode).
+    if generator is not None:
+        try:
+            if hasattr(generator, 'llm') and hasattr(generator.llm, 'shutdown'):
+                generator.llm.shutdown()
+            elif hasattr(generator, 'llm') and hasattr(generator.llm, '__del__'):
+                del generator.llm
+        except Exception:
+            pass  # Best-effort cleanup.
+        logger.info("Generator shut down.")
+
 
 if __name__ == "__main__":
     main()
