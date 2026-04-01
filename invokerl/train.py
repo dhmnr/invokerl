@@ -302,7 +302,23 @@ def main() -> None:
         gen_device_idx = int(gen_device.split(":")[-1]) if ":" in gen_device else 0
         prev_device = torch.cuda.current_device()
         torch.cuda.set_device(gen_device_idx)
+
+        # Hide torchrun env vars from vLLM — it would see WORLD_SIZE>1 and
+        # try to participate in distributed setup, conflicting with our FSDP
+        # process group. vLLM needs its own TP setup (or TP=1 = no distributed).
+        _saved_env = {}
+        if args.fsdp:
+            for key in ("RANK", "WORLD_SIZE", "LOCAL_RANK", "LOCAL_WORLD_SIZE",
+                        "MASTER_ADDR", "MASTER_PORT", "GROUP_RANK"):
+                if key in os.environ:
+                    _saved_env[key] = os.environ.pop(key)
+
         generator = build_generator(cfg, trainer_config, tensor_parallel_size=gen_tp)
+
+        # Restore env vars for NCCL/FSDP.
+        if _saved_env:
+            os.environ.update(_saved_env)
+
         torch.cuda.set_device(prev_device)  # restore train device for NCCL
     else:
         generator = None  # Non-zero ranks don't run generation.
