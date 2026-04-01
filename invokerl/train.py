@@ -28,7 +28,13 @@ DTYPE_MAP = {
 }
 
 # Registry: config name -> (module_path, class_name)
-ALGORITHMS = {"grpo": ("invokerl.algorithms.grpo", "GRPO")}
+ALGORITHMS = {
+    "grpo": ("invokerl.algorithms.grpo", "GRPO"),
+    "dpo": ("invokerl.algorithms.dpo", "DPO"),
+    "simpo": ("invokerl.algorithms.simpo", "SimPO"),
+    "ppo": ("invokerl.algorithms.ppo", "PPO"),
+    "dapo": ("invokerl.algorithms.dapo", "DAPO"),
+}
 DATASETS = {"gsm8k": ("invokerl.data.gsm8k", "GSM8KDataset")}
 REWARDS = {"rule": ("invokerl.rewards.rule", "ExactMatchReward")}
 
