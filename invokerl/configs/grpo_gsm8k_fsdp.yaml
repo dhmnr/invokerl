@@ -1,15 +1,24 @@
-# GRPO training on GSM8K — FSDP distributed + disaggregated pipeline
-# TP=1 gen on cuda:0, FSDP=2 train on cuda:1+cuda:2
+# GRPO training on GSM8K — independently scalable multi-GPU
+# Gen pool: vLLM TP=N on cuda:0..(N-1)
+# Train pool: FSDP×M on cuda:N..(N+M-1)
 #
-# Usage (3 GPUs: 1 gen + 2 train):
+# Usage (3 GPUs: TP=1 gen + FSDP=2 train):
 #   torchrun --nproc_per_node=2 -m invokerl.train \
 #     --config invokerl/configs/grpo_gsm8k_fsdp.yaml \
-#     --disagg --fsdp --gen-device cuda:0 --train-device-start 1
+#     --disagg --fsdp --gen-device cuda:0 --gen-tp 1 --train-device-start 1
 #
-# Usage (4 GPUs: 1 gen + 3 train):
-#   torchrun --nproc_per_node=3 -m invokerl.train \
+# Usage (4 GPUs: TP=2 gen + FSDP=2 train):
+#   torchrun --nproc_per_node=2 -m invokerl.train \
 #     --config invokerl/configs/grpo_gsm8k_fsdp.yaml \
-#     --disagg --fsdp --gen-device cuda:0 --train-device-start 1
+#     --disagg --fsdp --gen-device cuda:0 --gen-tp 2 --train-device-start 2
+#
+# Usage (6 GPUs: TP=2 gen + FSDP=4 train):
+#   torchrun --nproc_per_node=4 -m invokerl.train \
+#     --config invokerl/configs/grpo_gsm8k_fsdp.yaml \
+#     --disagg --fsdp --gen-device cuda:0 --gen-tp 2 --train-device-start 2
+#
+# Use --vllm-ref to skip loading a separate ref model (saves ~1.2 GB):
+#   ... --vllm-ref
 model:
   name_or_path: Qwen/Qwen3-0.6B
   dtype: bfloat16

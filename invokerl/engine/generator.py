@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 
 # Disable vLLM V1 multiprocessing so the model runs in-process.
 # This enables direct GPU parameter copy for weight sync (~2.8ms vs ~1600ms).
+# With TP > 1, vLLM uses NCCL within the process for tensor parallelism.
+# If TP doesn't work in-process, weight sync falls back to safetensors.
 # Must be set before importing vllm.
 os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
@@ -76,8 +78,11 @@ class VLLMGenerator(BaseGenerator):
         dtype: str = "bfloat16",
         seed: int = 42,
         max_model_len: int | None = None,
+        tensor_parallel_size: int = 1,
     ):
         from vllm import LLM
+
+        self.tensor_parallel_size = tensor_parallel_size
 
         self.llm = LLM(
             model=model_name_or_path,
@@ -87,6 +92,7 @@ class VLLMGenerator(BaseGenerator):
             seed=seed,
             max_model_len=max_model_len,
             enable_prefix_caching=True,  # reuse prompt KV cache for GRPO groups
+            tensor_parallel_size=tensor_parallel_size,
         )
         # Store dtype for weight sync casting (fp32 master weights → bf16 vLLM)
         _dtype_map = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
@@ -96,13 +102,20 @@ class VLLMGenerator(BaseGenerator):
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
         # Weight sync: "direct" (GPU copy) or "safetensors" (fallback).
+        # With TP > 1, direct GPU copy may not work (workers are separate
+        # processes), so safetensors is the default for TP > 1.
         self._sync_strategy: str | None = None
+        if tensor_parallel_size > 1:
+            self._sync_strategy = "safetensors"
+            logger.info("TP=%d: using safetensors weight sync (workers are separate processes)",
+                        tensor_parallel_size)
 
         logger.info(
-            "VLLMGenerator initialized: model=%s, gpu_mem=%.1f%%, dtype=%s",
+            "VLLMGenerator initialized: model=%s, gpu_mem=%.1f%%, dtype=%s, tp=%d",
             model_name_or_path,
             gpu_memory_utilization * 100,
             dtype,
+            tensor_parallel_size,
         )
 
     def generate(

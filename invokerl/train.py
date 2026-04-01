@@ -122,7 +122,7 @@ def build_reward(cfg: dict):
     return cls()
 
 
-def build_generator(cfg: dict, trainer_config: TrainerConfig):
+def build_generator(cfg: dict, trainer_config: TrainerConfig, tensor_parallel_size: int = 1):
     """Instantiate vLLM generation engine."""
     from invokerl.engine.generator import VLLMGenerator
 
@@ -134,6 +134,7 @@ def build_generator(cfg: dict, trainer_config: TrainerConfig):
         enforce_eager=gen_cfg.get("enforce_eager", False),
         dtype=model_cfg.get("dtype", "bfloat16"),
         max_model_len=gen_cfg.get("max_model_len", None),
+        tensor_parallel_size=tensor_parallel_size,
     )
 
 
@@ -198,6 +199,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--eval-samples", type=int, default=None, help="Override eval sample count")
     p.add_argument("--max-steps", type=int, default=None, help="Override total_steps")
     p.add_argument("--no-ref", action="store_true", help="Skip reference model (saves memory)")
+    p.add_argument("--vllm-ref", action="store_true",
+                   help="Use vLLM for ref log-probs instead of a separate model (saves ~1.2 GB)")
     p.add_argument("--max-train-samples", type=int, default=None, help="Limit training dataset size")
     p.add_argument("--seed", type=int, default=42, help="Random seed")
     p.add_argument("--verbose", action="store_true", help="Debug logging")
@@ -206,7 +209,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--disagg", action="store_true",
                    help="Run generation and training on separate GPUs")
     p.add_argument("--gen-device", type=str, default="cuda:0",
-                   help="GPU for vLLM generation (default: cuda:0)")
+                   help="First GPU for vLLM generation (default: cuda:0)")
+    p.add_argument("--gen-tp", type=int, default=1,
+                   help="vLLM tensor parallel size — number of GPUs for generation (default: 1)")
     p.add_argument("--train-device", type=str, default="cuda:1",
                    help="GPU for policy training (default: cuda:1)")
     p.add_argument("--sync-every", type=int, default=1,
@@ -252,8 +257,8 @@ def main() -> None:
                 trainer_config.accumulation_steps, trainer_config.group_size)
 
     if args.disagg:
-        logger.info("Disaggregated mode: gen=%s, train=%s, sync_every=%d, buffer=%d",
-                    args.gen_device, args.train_device, args.sync_every, args.buffer_size)
+        logger.info("Disaggregated mode: gen=%s (TP=%d), train=%s, sync_every=%d, buffer=%d",
+                    args.gen_device, args.gen_tp, args.train_device, args.sync_every, args.buffer_size)
 
     # -- FSDP distributed setup ------------------------------------------------
     fsdp_rank = 0
@@ -282,9 +287,10 @@ def main() -> None:
         train_device = args.train_device if args.disagg else "cuda"
 
     # Only rank 0 initializes vLLM (gen runs on a separate GPU pool).
+    gen_tp = args.gen_tp if args.disagg else 1
     if fsdp_rank == 0:
-        logger.info("Initializing vLLM generator...")
-        generator = build_generator(cfg, trainer_config)
+        logger.info("Initializing vLLM generator (TP=%d)...", gen_tp)
+        generator = build_generator(cfg, trainer_config, tensor_parallel_size=gen_tp)
     else:
         generator = None  # Non-zero ranks don't run generation.
 
@@ -304,9 +310,12 @@ def main() -> None:
             cpu_offload=args.fsdp_cpu_offload,
         )
 
-    if args.no_ref:
+    if args.no_ref or args.vllm_ref:
         ref_policy = None
-        logger.info("Reference model skipped (--no-ref)")
+        if args.vllm_ref:
+            logger.info("Reference model: using vLLM compute_log_probs (--vllm-ref)")
+        else:
+            logger.info("Reference model skipped (--no-ref)")
     else:
         # Only rank 0 loads ref policy (it's on the gen device).
         if fsdp_rank == 0:
@@ -363,6 +372,7 @@ def main() -> None:
                 ),
                 batch_size=trainer_config.batch_size,
                 group_size=trainer_config.group_size,
+                use_vllm_ref=args.vllm_ref,
             )
         else:
             pipeline = None

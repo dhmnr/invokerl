@@ -69,6 +69,7 @@ class DisaggPipeline:
         gen_config: GenerationConfig,
         batch_size: int = 4,
         group_size: int = 4,
+        use_vllm_ref: bool = False,
     ):
         self.config = config
         self.generator = generator
@@ -78,6 +79,9 @@ class DisaggPipeline:
         self.gen_config = gen_config
         self.batch_size = batch_size
         self.group_size = group_size
+        # Use vLLM's compute_log_probs() for ref log-probs instead of a
+        # separate PolicyModel. Saves ~1.2 GB and benefits from TP scaling.
+        self.use_vllm_ref = use_vllm_ref
 
         # Bounded queue: gen thread produces, train thread consumes.
         self._queue: queue.Queue[RolloutBatch | None] = queue.Queue(
@@ -204,6 +208,16 @@ class DisaggPipeline:
             ref_log_probs = self.ref_policy.forward_no_grad(
                 gen_out.token_ids, gen_out.attention_mask,
             )
+        elif self.use_vllm_ref:
+            # Use vLLM to compute ref log-probs instead of a separate model.
+            # This saves ~1.2 GB (no frozen PolicyModel needed) and gets TP
+            # benefits for free. The ref is the initial (pre-training) weights,
+            # frozen at pipeline start — but here we approximate with the
+            # generation-time weights (staleness ≤ sync_every steps).
+            with self._vllm_lock:
+                ref_log_probs = self.generator.compute_log_probs(
+                    gen_out.token_ids, gen_out.attention_mask,
+                )
         else:
             ref_log_probs = gen_out.log_probs.clone()
         self._t_ref += time.perf_counter() - t0
