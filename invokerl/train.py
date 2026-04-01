@@ -296,7 +296,14 @@ def main() -> None:
     gen_tp = args.gen_tp if args.disagg else 1
     if fsdp_rank == 0:
         logger.info("Initializing vLLM generator (TP=%d)...", gen_tp)
+        # vLLM uses torch.cuda.current_device() for model placement.
+        # In FSDP mode we set current_device to the train GPU, so we must
+        # temporarily switch to the gen GPU for vLLM init.
+        gen_device_idx = int(gen_device.split(":")[-1]) if ":" in gen_device else 0
+        prev_device = torch.cuda.current_device()
+        torch.cuda.set_device(gen_device_idx)
         generator = build_generator(cfg, trainer_config, tensor_parallel_size=gen_tp)
+        torch.cuda.set_device(prev_device)  # restore train device for NCCL
     else:
         generator = None  # Non-zero ranks don't run generation.
 
