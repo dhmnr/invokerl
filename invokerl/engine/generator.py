@@ -343,11 +343,10 @@ class VLLMGenerator(BaseGenerator):
             prompt_ids_list.append(token_ids[i, :sl].tolist())
             seq_lens.append(sl)
 
-        # Batch scoring through vLLM
-        outputs = self.llm.generate(
-            prompt_token_ids=prompt_ids_list,
-            sampling_params=params,
-        )
+        # Batch scoring through vLLM.
+        # Pass token ID lists as positional arg — vLLM ≥0.18 accepts
+        # Sequence[list[int]] as the `prompts` parameter.
+        outputs = self.llm.generate(prompt_ids_list, params)
 
         # Extract log-probs from prompt_logprobs
         result = torch.zeros(B, T, dtype=torch.float32)
