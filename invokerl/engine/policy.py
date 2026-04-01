@@ -84,18 +84,32 @@ class PolicyModel:
             else contextlib.nullcontext()
         )
         with ctx:
-            # Get hidden states from base transformer (no lm_head projection).
-            # self.model.model is the base transformer (e.g., Qwen2Model)
-            # without the final vocab projection.
-            hidden_states = self.model.model(
-                input_ids=token_ids, attention_mask=attention_mask,
-            ).last_hidden_state[:, :-1, :]  # [B, T-1, H]
-
             targets = token_ids[:, 1:]  # [B, T-1]
 
-            log_probs = self._chunked_lm_head_ce(
-                hidden_states, targets, ce_chunk_size,
-            )
+            if self._fsdp_wrapped:
+                # FSDP: must call through the outer wrapper so parameters
+                # get unsharded (allgathered) correctly. Directly accessing
+                # self.model.model bypasses FSDP and hits sharded 1-D weights.
+                outputs = self.model(
+                    input_ids=token_ids, attention_mask=attention_mask,
+                )
+                logits = outputs.logits[:, :-1, :]  # [B, T-1, V]
+                V = logits.size(-1)
+                log_probs = -F.cross_entropy(
+                    logits.reshape(-1, V), targets.reshape(-1),
+                    reduction="none",
+                ).reshape(targets.shape)
+                del logits, outputs
+            else:
+                # Non-FSDP: chunked lm_head+CE to avoid materializing full
+                # [B, T, V] logits (~10GB at B×G=56, 512tok).
+                hidden_states = self.model.model(
+                    input_ids=token_ids, attention_mask=attention_mask,
+                ).last_hidden_state[:, :-1, :]  # [B, T-1, H]
+
+                log_probs = self._chunked_lm_head_ce(
+                    hidden_states, targets, ce_chunk_size,
+                )
 
         # Pad position 0 with zeros
         pad = torch.zeros(
