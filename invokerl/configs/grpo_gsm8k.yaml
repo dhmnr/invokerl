@@ -15,7 +15,7 @@ training:
   grad_clip: 1.0
   warmup_steps: 50
   lr_schedule: cosine           # cosine decay after warmup (prevents overtraining)
-  lr_end: 0.0                   # decay to zero
+  lr_end: 1.0e-6                # decay to 10% of peak (prevents late collapse)
   accumulation_steps: 4
   batch_size: 1                 # prompts per micro-batch
   group_size: 4                 # completions per prompt
