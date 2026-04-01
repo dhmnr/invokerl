@@ -262,23 +262,55 @@ class Trainer:
     # -- Checkpointing ---------------------------------------------------------
 
     def save_checkpoint(self, step: int) -> str:
+        """Save model + optimizer checkpoint.
+
+        All CUDA tensors are copied to CPU before serialization to avoid
+        conflicts with vLLM's CUDA graph memory pool. Without this, torch.save
+        can trigger cudaErrorLaunchFailure when CUDA graphs are active.
+        """
         ckpt_dir = os.path.join(self.config.output_dir, f"step_{step}")
         os.makedirs(ckpt_dir, exist_ok=True)
 
-        self.policy.model.save_pretrained(ckpt_dir)
+        # Synchronize the training device to flush pending CUDA ops before
+        # reading GPU tensors. Only sync the train device — never the gen
+        # device from this thread (disrupts vLLM's CUDA graph pool).
+        train_device = next(self.policy.model.parameters()).device
+        torch.cuda.synchronize(train_device)
+
+        # Save model weights via CPU state_dict to avoid GPU tensor serialization
+        # that can conflict with CUDA graph memory pools.
+        cpu_state_dict = {
+            k: v.cpu() for k, v in self.policy.model.state_dict().items()
+        }
+        self.policy.model.save_pretrained(ckpt_dir, state_dict=cpu_state_dict)
+        del cpu_state_dict
         self.policy.tokenizer.save_pretrained(ckpt_dir)
 
+        # Move optimizer state to CPU before torch.save.
+        cpu_optim_state = self._optimizer_state_to_cpu(self.optimizer.state_dict())
         torch.save({
             "step": step,
-            "optimizer": self.optimizer.state_dict(),
+            "optimizer": cpu_optim_state,
             "scheduler": self.scheduler.state_dict(),
             "history": self.history,
             "weight_version": self._weight_version,
         }, os.path.join(ckpt_dir, "training_state.pt"))
+        del cpu_optim_state
 
         logger.info("Checkpoint saved: %s", ckpt_dir)
         self._cleanup_old_checkpoints()
         return ckpt_dir
+
+    @staticmethod
+    def _optimizer_state_to_cpu(state_dict: dict) -> dict:
+        """Recursively move all tensors in an optimizer state_dict to CPU."""
+        cpu_state = {"state": {}, "param_groups": state_dict["param_groups"]}
+        for param_id, param_state in state_dict["state"].items():
+            cpu_state["state"][param_id] = {
+                k: v.cpu() if isinstance(v, Tensor) else v
+                for k, v in param_state.items()
+            }
+        return cpu_state
 
     def _cleanup_old_checkpoints(self) -> None:
         if self.config.max_checkpoints <= 0:
@@ -551,7 +583,12 @@ class Trainer:
                         step_metrics.update(eval_metrics)
 
                 if cfg.save_every > 0 and (step + 1) % cfg.save_every == 0:
-                    self.save_checkpoint(step + 1)
+                    # Hold vLLM lock during save to prevent the gen thread
+                    # from doing concurrent CUDA copies (weight sync) while
+                    # we're copying model/optimizer tensors to CPU. Concurrent
+                    # cross-device copies from cuda:1 cause launch failures.
+                    with pipeline._vllm_lock:
+                        self.save_checkpoint(step + 1)
 
         finally:
             pipeline_stats = pipeline.stop()
