@@ -261,7 +261,26 @@ def main() -> None:
         logger.info("Disaggregated mode: gen=%s (TP=%d), train=%s, sync_every=%d, buffer=%d",
                     args.gen_device, args.gen_tp, args.train_device, args.sync_every, args.buffer_size)
 
-    # -- FSDP distributed setup ------------------------------------------------
+    # In disagg mode, vLLM runs on gen_device, policy on train_device.
+    gen_device = args.gen_device if args.disagg else "cuda"
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+
+    # -- vLLM init (BEFORE torch.distributed) ----------------------------------
+    # vLLM must initialize before init_process_group because vLLM V1 checks
+    # torch.distributed.is_initialized() and tries to coordinate across ranks,
+    # causing a deadlock when only rank 0 runs vLLM.
+    gen_tp = args.gen_tp if args.disagg else 1
+    if local_rank == 0 and args.disagg:
+        gen_device_idx = int(gen_device.split(":")[-1]) if ":" in gen_device else 0
+        torch.cuda.set_device(gen_device_idx)
+        logger.info("Initializing vLLM generator (TP=%d) on %s...", gen_tp, gen_device)
+        generator = build_generator(cfg, trainer_config, tensor_parallel_size=gen_tp)
+    elif not args.disagg:
+        generator = build_generator(cfg, trainer_config, tensor_parallel_size=gen_tp)
+    else:
+        generator = None  # Non-zero ranks don't run generation.
+
+    # -- FSDP distributed setup (AFTER vLLM) -----------------------------------
     fsdp_rank = 0
     fsdp_world = 1
     if args.fsdp:
@@ -269,7 +288,6 @@ def main() -> None:
         # Bind each rank to its train GPU (not LOCAL_RANK which may overlap
         # with the gen GPU). E.g., with --train-device-start 1 and 2 ranks:
         #   rank 0 → cuda:1, rank 1 → cuda:2  (cuda:0 is gen)
-        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
         train_device_id = args.train_device_start + local_rank
         fsdp_rank = init_distributed(device_id=train_device_id)
         fsdp_world = torch.distributed.get_world_size()
@@ -284,44 +302,10 @@ def main() -> None:
 
     logger.info("Datasets: %d train, %d eval", len(train_dataset), len(eval_dataset))
 
-    # In disagg mode, vLLM runs on gen_device, policy on train_device.
-    gen_device = args.gen_device if args.disagg else "cuda"
     if args.fsdp:
-        # Each rank gets its own training GPU.
         train_device = f"cuda:{args.train_device_start + fsdp_rank}"
     else:
         train_device = args.train_device if args.disagg else "cuda"
-
-    # Only rank 0 initializes vLLM (gen runs on a separate GPU pool).
-    gen_tp = args.gen_tp if args.disagg else 1
-    if fsdp_rank == 0:
-        logger.info("Initializing vLLM generator (TP=%d)...", gen_tp)
-        # vLLM uses torch.cuda.current_device() for model placement.
-        # In FSDP mode we set current_device to the train GPU, so we must
-        # temporarily switch to the gen GPU for vLLM init.
-        gen_device_idx = int(gen_device.split(":")[-1]) if ":" in gen_device else 0
-        prev_device = torch.cuda.current_device()
-        torch.cuda.set_device(gen_device_idx)
-
-        # Hide torchrun env vars from vLLM — it would see WORLD_SIZE>1 and
-        # try to participate in distributed setup, conflicting with our FSDP
-        # process group. vLLM needs its own TP setup (or TP=1 = no distributed).
-        _saved_env = {}
-        if args.fsdp:
-            for key in ("RANK", "WORLD_SIZE", "LOCAL_RANK", "LOCAL_WORLD_SIZE",
-                        "MASTER_ADDR", "MASTER_PORT", "GROUP_RANK"):
-                if key in os.environ:
-                    _saved_env[key] = os.environ.pop(key)
-
-        generator = build_generator(cfg, trainer_config, tensor_parallel_size=gen_tp)
-
-        # Restore env vars for NCCL/FSDP.
-        if _saved_env:
-            os.environ.update(_saved_env)
-
-        torch.cuda.set_device(prev_device)  # restore train device for NCCL
-    else:
-        generator = None  # Non-zero ranks don't run generation.
 
     # Now safe to seed CUDA (vLLM has already forked its engine)
     if torch.cuda.is_available():
