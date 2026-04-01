@@ -659,15 +659,21 @@ class Trainer:
 
         barrier()
 
-        # Start pipeline on rank 0 only.
+        # All ranks must participate in get_state_dict() — FSDP does an
+        # allgather internally to reconstruct the full parameter tensors.
+        # Only rank 0 feeds the result to the pipeline.
+        initial_state_dict = self.policy.get_state_dict()
+
         if is_main_rank():
-            pipeline.start(initial_state_dict=self.policy.get_state_dict())
+            pipeline.start(initial_state_dict=initial_state_dict)
             logger.info(
                 "Starting distributed disagg: %d steps, accum=%d, group=%d, "
                 "ranks=%d, sync_every=%d",
                 cfg.total_steps, cfg.accumulation_steps, cfg.group_size,
                 world_size, pipeline.config.sync_every,
             )
+
+        del initial_state_dict  # free non-rank-0 copies
 
         barrier()
 
