@@ -1,0 +1,47 @@
+# GRPO training on GSM8K — disaggregated 2-GPU pipeline, B×G=56
+# Testing chunked lm_head+CE to avoid OOM at larger batch sizes
+#
+# Usage:
+#   invokerl --config invokerl/configs/grpo_gsm8k_disagg_bg56.yaml \
+#     --disagg --gen-device cuda:0 --train-device cuda:1
+#
+# B=8, G=7 → B×G=56 sequences per step (vs 32 before)
+# Chunked CE keeps peak memory manageable at 512tok
+model:
+  name_or_path: Qwen/Qwen3-0.6B
+  dtype: bfloat16
+
+algorithm:
+  name: grpo
+  clip_eps: 0.2
+  beta: 0.04        # KL penalty coefficient
+
+training:
+  total_steps: 100        # short test run to validate memory
+  lr: 1.0e-5
+  weight_decay: 0.01
+  grad_clip: 1.0
+  warmup_steps: 10
+  lr_schedule: cosine
+  lr_end: 1.0e-6
+  accumulation_steps: 1
+  batch_size: 8            # 8 prompts per batch
+  group_size: 7            # 7 completions per prompt → 56 sequences
+
+generation:
+  max_new_tokens: 512
+  max_model_len: 2048
+  temperature: 0.9
+  top_k: 50
+  gpu_memory_utilization: 0.3
+
+reward:
+  type: rule
+  dataset: gsm8k
+
+logging:
+  log_every: 10
+  eval_every: 50
+  save_every: 0            # no saves for test run
+  eval_samples: 50         # quick eval for smoke test
+  output_dir: ./checkpoints/grpo_gsm8k_disagg_bg56
