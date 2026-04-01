@@ -269,12 +269,34 @@ def main() -> None:
     # vLLM must initialize before init_process_group because vLLM V1 checks
     # torch.distributed.is_initialized() and tries to coordinate across ranks,
     # causing a deadlock when only rank 0 runs vLLM.
+    #
+    # When VLLM_ENABLE_V1_MULTIPROCESSING=1, vLLM spawns a child process for
+    # EngineCore.  That child inherits env vars — if torchrun's MASTER_ADDR /
+    # MASTER_PORT / WORLD_SIZE are present, vLLM's internal init_process_group
+    # will try to join torchrun's rendezvous and hang.  We strip them before
+    # spawning and restore after.
     gen_tp = args.gen_tp if args.disagg else 1
     if local_rank == 0 and args.disagg:
         gen_device_idx = int(gen_device.split(":")[-1]) if ":" in gen_device else 0
         torch.cuda.set_device(gen_device_idx)
+
+        # Hide torchrun env vars from vLLM's spawned subprocess.
+        _torchrun_keys = [
+            "MASTER_ADDR", "MASTER_PORT", "RANK", "WORLD_SIZE",
+            "LOCAL_RANK", "LOCAL_WORLD_SIZE", "GROUP_RANK",
+            "TORCHELASTIC_RUN_ID", "TORCHELASTIC_RESTART_COUNT",
+            "TORCHELASTIC_MAX_RESTARTS", "OMP_NUM_THREADS",
+        ]
+        _saved_env: dict[str, str] = {}
+        for key in _torchrun_keys:
+            if key in os.environ:
+                _saved_env[key] = os.environ.pop(key)
+
         logger.info("Initializing vLLM generator (TP=%d) on %s...", gen_tp, gen_device)
         generator = build_generator(cfg, trainer_config, tensor_parallel_size=gen_tp)
+
+        # Restore torchrun env vars for FSDP init_process_group.
+        os.environ.update(_saved_env)
     elif not args.disagg:
         generator = build_generator(cfg, trainer_config, tensor_parallel_size=gen_tp)
     else:
