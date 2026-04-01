@@ -62,12 +62,15 @@ class PolicyModel:
     ) -> Tensor:
         """Compute per-token log-probs [B, T]. Position 0 is always 0.
 
-        Uses chunked cross-entropy to avoid materializing the full
-        [B*T, vocab_size] logits tensor. For Qwen3 (vocab=151936), this
-        reduces peak memory from ~10GB to ~1.2GB at B×G=56.
+        Uses chunked lm_head + cross-entropy to avoid materializing the full
+        [B*T, vocab_size] logits tensor. Instead of projecting all tokens to
+        vocab at once (~10GB for B×G=56 at 512tok), we:
+          1. Run the base transformer to get hidden states [B, T, H]
+          2. Loop over sequence chunks: project chunk to vocab via lm_head,
+             compute CE loss, discard logits — peak memory is B*chunk*V*4
 
         Args:
-            ce_chunk_size: Number of tokens per cross-entropy chunk.
+            ce_chunk_size: Number of tokens per lm_head+CE chunk.
                            Lower = less memory, slightly more overhead.
         """
         token_ids = token_ids.to(self.device)
@@ -79,13 +82,17 @@ class PolicyModel:
             else contextlib.nullcontext()
         )
         with ctx:
-            logits = self.model(
-                input_ids=token_ids, attention_mask=attention_mask
-            ).logits[:, :-1, :]  # [B, T-1, V]
+            # Get hidden states from base transformer (no lm_head projection).
+            # self.model.model is the base transformer (e.g., Qwen2Model)
+            # without the final vocab projection.
+            hidden_states = self.model.model(
+                input_ids=token_ids, attention_mask=attention_mask,
+            ).last_hidden_state[:, :-1, :]  # [B, T-1, H]
+
             targets = token_ids[:, 1:]  # [B, T-1]
 
-            log_probs = self._chunked_cross_entropy(
-                logits, targets, ce_chunk_size,
+            log_probs = self._chunked_lm_head_ce(
+                hidden_states, targets, ce_chunk_size,
             )
 
         # Pad position 0 with zeros
@@ -94,44 +101,49 @@ class PolicyModel:
         )
         return torch.cat([pad, log_probs], dim=1)
 
-    @staticmethod
-    def _chunked_cross_entropy(
-        logits: Tensor,
+    def _chunked_lm_head_ce(
+        self,
+        hidden_states: Tensor,
         targets: Tensor,
         chunk_size: int,
     ) -> Tensor:
-        """Compute cross-entropy in chunks along the token dimension.
+        """Fused chunked lm_head projection + cross-entropy.
 
-        Instead of materializing (B*T, V) in one shot, processes chunks
-        of `chunk_size` tokens. Peak memory: B * chunk_size * V * 4 bytes
-        instead of B * T * V * 4 bytes.
+        Projects hidden states to vocab and computes CE loss in chunks along
+        the sequence dimension. Each chunk's logits are discarded after computing
+        the loss, so peak memory is B * chunk_size * V instead of B * T * V.
 
         Args:
-            logits: [B, T, V] model output logits.
+            hidden_states: [B, T, H] final hidden states from the transformer.
             targets: [B, T] target token IDs.
             chunk_size: Tokens per chunk.
 
         Returns:
             log_probs: [B, T] per-token log-probabilities (negated CE).
         """
-        B, T, V = logits.shape
+        B, T, H = hidden_states.shape
+        lm_head = self.model.lm_head  # Linear(H, V)
+        V = lm_head.out_features
 
         # Small enough to do in one shot — skip chunking overhead.
         if B * T * V * 4 < 2 * (1024 ** 3):  # < 2 GB
+            logits = lm_head(hidden_states)
             return -F.cross_entropy(
                 logits.reshape(-1, V),
                 targets.reshape(-1),
                 reduction="none",
             ).reshape(B, T)
 
-        log_probs = torch.empty(B, T, device=logits.device, dtype=logits.dtype)
+        log_probs = torch.empty(B, T, device=hidden_states.device, dtype=hidden_states.dtype)
         for start in range(0, T, chunk_size):
             end = min(start + chunk_size, T)
+            chunk_logits = lm_head(hidden_states[:, start:end, :])  # [B, cs, V]
             log_probs[:, start:end] = -F.cross_entropy(
-                logits[:, start:end, :].reshape(-1, V),
+                chunk_logits.reshape(-1, V),
                 targets[:, start:end].reshape(-1),
                 reduction="none",
             ).reshape(B, end - start)
+            # chunk_logits goes out of scope → GPU memory freed
 
         return log_probs
 
