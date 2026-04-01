@@ -6,6 +6,7 @@
 #     --disagg --gen-device cuda:0 --train-device cuda:1
 #
 # Pipeline: ~87% GPU 1 util, ~2.7s/step, ~45 min for 1000 steps
+# Cosine lr decay prevents overtraining after step ~500
 model:
   name_or_path: Qwen/Qwen3-0.6B
   dtype: bfloat16
@@ -21,7 +22,8 @@ training:
   weight_decay: 0.01
   grad_clip: 1.0
   warmup_steps: 50
-  lr_schedule: constant
+  lr_schedule: cosine          # cosine decay after warmup
+  lr_end: 0.0                  # decay to zero
   accumulation_steps: 1    # no accumulation needed — B×G=32 is full batch
   batch_size: 8            # 8 prompts per batch
   group_size: 4            # 4 completions per prompt → 32 sequences
@@ -41,5 +43,5 @@ logging:
   log_every: 10
   eval_every: 100
   save_every: 500
-  eval_samples: 50
+  eval_samples: 200             # 200 samples for tighter CI (±3.5%)
   output_dir: ./checkpoints/grpo_gsm8k_disagg

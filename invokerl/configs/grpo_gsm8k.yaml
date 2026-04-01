@@ -9,14 +9,16 @@ algorithm:
   beta: 0.04        # KL penalty coefficient
 
 training:
-  total_steps: 200
-  lr: 5.0e-6
+  total_steps: 1000
+  lr: 1.0e-5
   weight_decay: 0.01
   grad_clip: 1.0
   warmup_steps: 50
+  lr_schedule: cosine           # cosine decay after warmup (prevents overtraining)
+  lr_end: 0.0                   # decay to zero
   accumulation_steps: 4
-  batch_size: 1      # prompts per micro-batch (matches tilerl v8)
-  group_size: 4      # completions per prompt
+  batch_size: 1                 # prompts per micro-batch
+  group_size: 4                 # completions per prompt
 
 generation:
   max_new_tokens: 512            # Qwen3 uses <think> tags — needs headroom
@@ -31,6 +33,6 @@ reward:
 
 logging:
   log_every: 10
-  eval_every: 50
-  save_every: 200
+  eval_every: 100
+  save_every: 500
   output_dir: ./checkpoints/grpo_gsm8k
