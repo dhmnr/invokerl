@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import logging
+import os
 import random
 import sys
 
@@ -265,7 +266,12 @@ def main() -> None:
     fsdp_world = 1
     if args.fsdp:
         from invokerl.engine.distributed import init_distributed
-        fsdp_rank = init_distributed()
+        # Bind each rank to its train GPU (not LOCAL_RANK which may overlap
+        # with the gen GPU). E.g., with --train-device-start 1 and 2 ranks:
+        #   rank 0 → cuda:1, rank 1 → cuda:2  (cuda:0 is gen)
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        train_device_id = args.train_device_start + local_rank
+        fsdp_rank = init_distributed(device_id=train_device_id)
         fsdp_world = torch.distributed.get_world_size()
         logger.info("FSDP: rank=%d, world=%d, sharding=%s",
                     fsdp_rank, fsdp_world, args.fsdp_sharding)

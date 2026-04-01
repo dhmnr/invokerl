@@ -28,21 +28,28 @@ logger = logging.getLogger(__name__)
 # -- Process group helpers ---------------------------------------------------
 
 
-def init_distributed(backend: str = "nccl") -> int:
-    """Initialize torch.distributed. Returns local rank.
+def init_distributed(backend: str = "nccl", device_id: int | None = None) -> int:
+    """Initialize torch.distributed. Returns rank.
 
     Expects torchrun environment variables (RANK, WORLD_SIZE, LOCAL_RANK).
+
+    Args:
+        device_id: CUDA device to bind this rank to. If None, uses LOCAL_RANK.
+                   In disagg mode with --train-device-start, pass
+                   train_device_start + LOCAL_RANK so NCCL uses the correct
+                   GPU (not the gen GPU).
     """
     if dist.is_initialized():
         return dist.get_rank()
 
     dist.init_process_group(backend=backend)
     rank = dist.get_rank()
-    local_rank = int(os.environ.get("LOCAL_RANK", str(rank)))
-    torch.cuda.set_device(local_rank)
+    if device_id is None:
+        device_id = int(os.environ.get("LOCAL_RANK", str(rank)))
+    torch.cuda.set_device(device_id)
     logger.info(
-        "Distributed init: rank=%d world=%d local_rank=%d",
-        rank, dist.get_world_size(), local_rank,
+        "Distributed init: rank=%d world=%d device=cuda:%d",
+        rank, dist.get_world_size(), device_id,
     )
     return rank
 
