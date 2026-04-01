@@ -8,6 +8,7 @@ import logging
 import torch
 import torch.nn.functional as F
 from torch import Tensor
+from torch.utils.checkpoint import checkpoint as ckpt
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 logger = logging.getLogger(__name__)
@@ -137,15 +138,38 @@ class PolicyModel:
         log_probs = torch.empty(B, T, device=hidden_states.device, dtype=hidden_states.dtype)
         for start in range(0, T, chunk_size):
             end = min(start + chunk_size, T)
-            chunk_logits = lm_head(hidden_states[:, start:end, :])  # [B, cs, V]
-            log_probs[:, start:end] = -F.cross_entropy(
-                chunk_logits.reshape(-1, V),
-                targets[:, start:end].reshape(-1),
-                reduction="none",
-            ).reshape(B, end - start)
-            # chunk_logits goes out of scope → GPU memory freed
+            # Recompute logits during backward instead of saving them.
+            # Without this, autograd saves all chunk logits simultaneously,
+            # defeating the chunked memory savings (~8 GB for B×G=56).
+            log_probs[:, start:end] = ckpt(
+                self._chunk_ce_fn,
+                lm_head.weight,
+                hidden_states[:, start:end, :].contiguous(),
+                targets[:, start:end].contiguous(),
+                use_reentrant=False,
+            )
 
         return log_probs
+
+    @staticmethod
+    def _chunk_ce_fn(
+        lm_head_weight: Tensor,
+        hidden_chunk: Tensor,
+        target_chunk: Tensor,
+    ) -> Tensor:
+        """Compute lm_head projection + CE for a single chunk.
+
+        Separated as a static method so torch.utils.checkpoint can
+        recompute the logits during backward (instead of saving them).
+        """
+        B, cs, H = hidden_chunk.shape
+        V = lm_head_weight.shape[0]
+        chunk_logits = F.linear(hidden_chunk, lm_head_weight)  # [B, cs, V]
+        return -F.cross_entropy(
+            chunk_logits.reshape(-1, V),
+            target_chunk.reshape(-1),
+            reduction="none",
+        ).reshape(B, cs)
 
     @torch.no_grad()
     def forward_no_grad(self, token_ids: Tensor, attention_mask: Tensor) -> Tensor:
