@@ -12,6 +12,7 @@ Architecture:
 from __future__ import annotations
 
 import logging
+import os
 from functools import partial
 from typing import Any
 
@@ -37,7 +38,7 @@ def init_distributed(backend: str = "nccl") -> int:
 
     dist.init_process_group(backend=backend)
     rank = dist.get_rank()
-    local_rank = int(torch.distributed.get_rank())  # torchrun sets LOCAL_RANK
+    local_rank = int(os.environ.get("LOCAL_RANK", str(rank)))
     torch.cuda.set_device(local_rank)
     logger.info(
         "Distributed init: rank=%d world=%d local_rank=%d",

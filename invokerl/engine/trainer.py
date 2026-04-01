@@ -279,8 +279,10 @@ class Trainer:
 
         # Save model weights via CPU state_dict to avoid GPU tensor serialization
         # that can conflict with CUDA graph memory pools.
+        # Use policy.get_state_dict() which is FSDP-aware — returns the full
+        # (unsharded) state dict on rank 0 when FSDP is active.
         cpu_state_dict = {
-            k: v.cpu() for k, v in self.policy.model.state_dict().items()
+            k: v.cpu() for k, v in self.policy.get_state_dict().items()
         }
         self.policy.model.save_pretrained(ckpt_dir, state_dict=cpu_state_dict)
         del cpu_state_dict
