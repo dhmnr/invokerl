@@ -7,10 +7,11 @@ import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
-# Disable vLLM V1 multiprocessing so the model runs in-process.
-# This enables direct GPU parameter copy for weight sync (~2.8ms vs ~1600ms).
-# With TP > 1, vLLM uses NCCL within the process for tensor parallelism.
-# If TP doesn't work in-process, weight sync falls back to safetensors.
+# V1 multiprocessing mode: "0" = in-process (fast weight sync ~2.8ms),
+# "1" = separate process (safetensors sync ~1.6s but isolated NCCL).
+# Default to in-process for single-GPU/disagg-2GPU setups. When used with
+# FSDP (torchrun), the caller should set VLLM_ENABLE_V1_MULTIPROCESSING=1
+# because in-process mode conflicts with torchrun's NCCL process group.
 # Must be set before importing vllm.
 os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
