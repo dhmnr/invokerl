@@ -59,7 +59,7 @@ class PolicyModel:
         self,
         token_ids: Tensor,
         attention_mask: Tensor,
-        ce_chunk_size: int = 512,
+        ce_chunk_size: int = 64,
     ) -> Tensor:
         """Compute per-token log-probs [B, T]. Position 0 is always 0.
 
