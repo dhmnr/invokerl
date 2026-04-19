@@ -232,6 +232,16 @@ def parse_args() -> argparse.Namespace:
                    help="FSDP sharding strategy (default: FULL_SHARD)")
     p.add_argument("--fsdp-cpu-offload", action="store_true",
                    help="Offload FSDP params to CPU when not in use")
+
+    # Profiling (overrides the profiling: section of the YAML config).
+    p.add_argument("--profile", action="store_true",
+                   help="Profile training steps instead of running full training")
+    p.add_argument("--profile-num-steps", type=int, default=None,
+                   help="Number of profiled steps (overrides config)")
+    p.add_argument("--profile-perfetto", action="store_true",
+                   help="Also export a Chrome/Perfetto trace for one step")
+    p.add_argument("--profile-output-dir", type=str, default=None,
+                   help="Output directory for profiling artifacts")
     return p.parse_args()
 
 
@@ -244,6 +254,25 @@ def main() -> None:
     torch.manual_seed(args.seed)
 
     cfg = load_config(args.config)
+
+    # -- Profiling mode (short-circuits full training) -------------------------
+    # Controlled by `profiling:` section in the YAML config, or --profile on CLI.
+    prof_cfg = cfg.get("profiling") or {}
+    prof_enabled = args.profile or prof_cfg.get("enabled", False)
+    if prof_enabled:
+        if args.disagg or args.fsdp:
+            raise SystemExit("Profiling is single-GPU only (no --disagg, no --fsdp)")
+        from invokerl.profiling.cli import run_profiling
+        run_profiling(
+            config_path=args.config,
+            num_steps=args.profile_num_steps or prof_cfg.get("num_steps", 3),
+            output_dir=args.profile_output_dir or prof_cfg.get("output_dir", "results/profile"),
+            perfetto=args.profile_perfetto or prof_cfg.get("perfetto", False),
+            no_ref=args.no_ref,
+            seed=args.seed,
+        )
+        return
+
     trainer_config = build_trainer_config(cfg)
 
     if args.eval_samples is not None:
