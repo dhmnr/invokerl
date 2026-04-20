@@ -24,6 +24,7 @@ from invokerl.algorithms.base import BaseAlgorithm, RolloutBatch
 from invokerl.data.base import BaseDataset, PromptItem
 from invokerl.engine.generator import BaseGenerator, GenerationConfig
 from invokerl.engine.policy import PolicyModel
+from invokerl.profiling import annotate
 from invokerl.rewards.base import BaseReward
 
 logger = logging.getLogger(__name__)
@@ -144,18 +145,21 @@ class Trainer:
         expanded_prompts = [p.prompt for p in prompts for _ in range(G)]
         expanded_truths = [p.ground_truth for p in prompts for _ in range(G)]
 
-        gen_out = self.generator.generate(expanded_prompts, self.gen_config)
+        with annotate("generation", color="blue"):
+            gen_out = self.generator.generate(expanded_prompts, self.gen_config)
 
-        rewards = self.reward_fn.score_batch(
-            expanded_prompts, gen_out.texts, ground_truths=expanded_truths,
-        ).to(gen_out.token_ids.device)
+        with annotate("reward", color="yellow"):
+            rewards = self.reward_fn.score_batch(
+                expanded_prompts, gen_out.texts, ground_truths=expanded_truths,
+            ).to(gen_out.token_ids.device)
 
-        if self.ref_policy is not None:
-            ref_log_probs = self.ref_policy.forward_no_grad(
-                gen_out.token_ids, gen_out.attention_mask,
-            )
-        else:
-            ref_log_probs = gen_out.log_probs.clone()
+        with annotate("ref_forward", color="green"):
+            if self.ref_policy is not None:
+                ref_log_probs = self.ref_policy.forward_no_grad(
+                    gen_out.token_ids, gen_out.attention_mask,
+                )
+            else:
+                ref_log_probs = gen_out.log_probs.clone()
 
         group_ids = torch.arange(B, device=gen_out.token_ids.device).repeat_interleave(G)
 
@@ -179,10 +183,13 @@ class Trainer:
         """One micro-batch: advantages -> forward -> loss -> backward."""
         batch = self._batch_to_device(batch)
         advantages = self.algorithm.compute_advantages(batch)
-        new_log_probs = self.policy.forward(batch.token_ids, batch.attention_mask)
-        loss, metrics = self.algorithm.compute_loss(new_log_probs, batch, advantages)
+        with annotate("policy_forward", color="orange"):
+            new_log_probs = self.policy.forward(batch.token_ids, batch.attention_mask)
+        with annotate("loss_computation", color="red"):
+            loss, metrics = self.algorithm.compute_loss(new_log_probs, batch, advantages)
 
-        (loss / self.config.accumulation_steps).backward()
+        with annotate("backward", color="purple"):
+            (loss / self.config.accumulation_steps).backward()
         return loss, metrics
 
     def _batch_to_device(self, batch: RolloutBatch) -> RolloutBatch:
@@ -207,24 +214,26 @@ class Trainer:
 
     def optimizer_step(self) -> float:
         """Clip gradients, step optimizer, sync weights. Returns grad norm."""
-        grad_norm = torch.nn.utils.clip_grad_norm_(
-            self.policy.parameters(), self.config.grad_clip,
-        )
-        self.optimizer.step()
-        self.scheduler.step()
-        self.optimizer.zero_grad()
+        with annotate("optimizer_step", color="cyan"):
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                self.policy.parameters(), self.config.grad_clip,
+            )
+            self.optimizer.step()
+            self.scheduler.step()
+            self.optimizer.zero_grad()
 
         # In disagg mode, the pipeline handles weight sync on its own schedule.
         if not self._disagg_mode:
-            if self._weights_shared:
-                torch.cuda.synchronize()
-                # Verify sharing is intact after first step
-                if self.step == 0 and hasattr(self, "_vllm_params"):
-                    if not self.policy.verify_shared_weights(self._vllm_params):
-                        logger.warning("Shared weights broken -- falling back to copy sync")
-                        self._weights_shared = False
-            else:
-                self.generator.update_weights(self.policy.get_state_dict())
+            with annotate("weight_sync", color="brown"):
+                if self._weights_shared:
+                    torch.cuda.synchronize()
+                    # Verify sharing is intact after first step
+                    if self.step == 0 and hasattr(self, "_vllm_params"):
+                        if not self.policy.verify_shared_weights(self._vllm_params):
+                            logger.warning("Shared weights broken -- falling back to copy sync")
+                            self._weights_shared = False
+                else:
+                    self.generator.update_weights(self.policy.get_state_dict())
 
         self._weight_version += 1
 
