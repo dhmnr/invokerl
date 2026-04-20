@@ -38,10 +38,7 @@ def main():
     policy = rl.Policy(MODEL, dtype=torch.bfloat16)
 
     # Reference policy (frozen, used for KL penalty)
-    ref_policy = rl.Policy(MODEL, dtype=torch.bfloat16)
-    ref_policy.model.eval()
-    for p in ref_policy.model.parameters():
-        p.requires_grad = False
+    ref_policy = rl.Policy(MODEL, dtype=torch.bfloat16).freeze()
 
     trainer = rl.Trainer(
         config=rl.TrainerConfig(

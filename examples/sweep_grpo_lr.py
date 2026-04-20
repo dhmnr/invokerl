@@ -43,10 +43,7 @@ def run_one(lr: float) -> None:
         torch.cuda.manual_seed_all(42)
 
     policy = rl.Policy(MODEL, dtype=torch.bfloat16)
-    ref_policy = rl.Policy(MODEL, dtype=torch.bfloat16)
-    ref_policy.model.eval()
-    for p in ref_policy.model.parameters():
-        p.requires_grad = False
+    ref_policy = rl.Policy(MODEL, dtype=torch.bfloat16).freeze()
 
     trainer = rl.Trainer(
         config=rl.TrainerConfig(

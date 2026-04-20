@@ -201,6 +201,19 @@ class PolicyModel:
     def parameters(self):
         return self.model.parameters()
 
+    def freeze(self) -> "PolicyModel":
+        """Put the model in eval mode and disable gradients on all params.
+
+        Use this for reference policies:
+            ref_policy = rl.Policy("Qwen/...").freeze()
+
+        Returns self for chaining.
+        """
+        self.model.eval()
+        for p in self.model.parameters():
+            p.requires_grad = False
+        return self
+
     # -- FSDP support ----------------------------------------------------------
 
     def fsdp(
