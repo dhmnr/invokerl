@@ -11,7 +11,7 @@ import re
 
 from datasets import load_dataset
 
-from invokerl.data.base import BaseDataset, PromptItem
+from invokerl.datasets.base import BaseDataset, PromptItem
 
 
 # GSM8K answer format: "#### <number>" at the end of the solution
@@ -44,7 +44,7 @@ def _format_prompt(question: str) -> str:
     )
 
 
-class GSM8KDataset(BaseDataset):
+class GSM8K(BaseDataset):
     """GSM8K training and test dataset.
 
     Args:

@@ -69,13 +69,13 @@ def main():
             max_new_tokens=512, temperature=0.9,
             output_dir="./checkpoints/grpo_gsm8k_fsdp",
         ),
-        algorithm=rl.GRPO(clip_eps=0.2, beta=0.04),
+        algorithm=rl.algorithms.GRPO(clip_eps=0.2, beta=0.04),
         generator=generator,
         policy=policy,
         ref_policy=ref_policy,
-        reward_fn=rl.ExactMatch(),
-        dataset=rl.GSM8K("train"),
-        eval_dataset=rl.GSM8K("test") if local_rank == 0 else None,
+        reward_fn=rl.rewards.ExactMatch(),
+        dataset=rl.datasets.GSM8K("train"),
+        eval_dataset=rl.datasets.GSM8K("test") if local_rank == 0 else None,
     )
 
     pipeline = None
@@ -87,7 +87,7 @@ def main():
                 sync_every=1, buffer_size=2, max_staleness=0,
             ),
             generator=generator, ref_policy=ref_policy,
-            reward_fn=rl.ExactMatch(), dataset=rl.GSM8K("train"),
+            reward_fn=rl.rewards.ExactMatch(), dataset=rl.datasets.GSM8K("train"),
             gen_config=rl.GenerationConfig(max_new_tokens=512, temperature=0.9, top_k=50),
             batch_size=1, group_size=4,
         )

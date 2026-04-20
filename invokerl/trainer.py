@@ -21,7 +21,7 @@ from torch import Tensor
 from torch.optim import AdamW
 
 from invokerl.algorithms.base import BaseAlgorithm, RolloutBatch
-from invokerl.data.base import BaseDataset, PromptItem
+from invokerl.datasets.base import BaseDataset, PromptItem
 from invokerl.generator import BaseGenerator, GenerationConfig
 from invokerl.policy import PolicyModel
 from invokerl.profiling import annotate

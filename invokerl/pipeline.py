@@ -29,7 +29,7 @@ import torch
 from torch import Tensor
 
 from invokerl.algorithms.base import RolloutBatch
-from invokerl.data.base import BaseDataset
+from invokerl.datasets.base import BaseDataset
 from invokerl.generator import BaseGenerator, GenerationConfig
 from invokerl.policy import PolicyModel
 from invokerl.rewards.base import BaseReward

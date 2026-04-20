@@ -59,13 +59,13 @@ def run_one(lr: float) -> None:
             save_every=0,
             output_dir=f"./checkpoints/sweep_lr_{lr:.0e}",
         ),
-        algorithm=rl.GRPO(clip_eps=0.2, beta=0.04),
+        algorithm=rl.algorithms.GRPO(clip_eps=0.2, beta=0.04),
         generator=generator,
         policy=policy,
         ref_policy=ref_policy,
-        reward_fn=rl.ExactMatch(),
-        dataset=rl.GSM8K("train"),
-        eval_dataset=rl.GSM8K("test"),
+        reward_fn=rl.rewards.ExactMatch(),
+        dataset=rl.datasets.GSM8K("train"),
+        eval_dataset=rl.datasets.GSM8K("test"),
     )
 
     history = trainer.train()

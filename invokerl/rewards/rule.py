@@ -93,7 +93,7 @@ def check_answer(prediction: str | None, ground_truth: str) -> bool:
     return prediction.strip() == ground_truth.strip()
 
 
-class ExactMatchReward(BaseReward):
+class ExactMatch(BaseReward):
     """Binary reward: 1.0 if extracted answer matches ground truth, 0.0 otherwise.
 
     Works with any dataset that provides ground_truth in PromptItem.

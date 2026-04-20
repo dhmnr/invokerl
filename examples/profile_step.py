@@ -50,12 +50,12 @@ def main():
             eval_every=0,      # skip eval during profiling
             save_every=0,      # skip checkpoints
         ),
-        algorithm=rl.GRPO(clip_eps=0.2, beta=0.04),
+        algorithm=rl.algorithms.GRPO(clip_eps=0.2, beta=0.04),
         generator=generator,
         policy=policy,
         ref_policy=None,       # saves memory for this profiling run
-        reward_fn=rl.ExactMatch(),
-        dataset=rl.GSM8K("train"),
+        reward_fn=rl.rewards.ExactMatch(),
+        dataset=rl.datasets.GSM8K("train"),
     )
 
     # Warmup step (not profiled — amortizes CUDA init, JIT, allocator caches)
