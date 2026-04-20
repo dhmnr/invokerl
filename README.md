@@ -8,8 +8,7 @@ Hackable and performant RL post-training for LLMs.
 pip install invokerl
 ```
 
-## Quick start
-### single GPU
+## Quick start on Single GPU
 
 ```python
 import invokerl as rl
