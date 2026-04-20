@@ -1,0 +1,35 @@
+# Smoke-test config: trigger profiling mode via YAML (not CLI flag).
+# Inherits everything from grpo_gsm8k.yaml; user runs this to produce a
+# profile without remembering --profile.
+model:
+  name_or_path: Qwen/Qwen3-0.6B
+  dtype: bfloat16
+
+algorithm:
+  name: grpo
+  clip_eps: 0.2
+  beta: 0.04
+
+training:
+  total_steps: 200
+  lr: 5.0e-6
+  batch_size: 1
+  group_size: 4
+  accumulation_steps: 4
+
+generation:
+  max_new_tokens: 512
+  max_model_len: 2048
+  temperature: 0.9
+  top_k: 50
+  gpu_memory_utilization: 0.3
+
+reward:
+  type: rule
+  dataset: gsm8k
+
+profiling:
+  enabled: true
+  num_steps: 2
+  perfetto: true
+  output_dir: results/profile_yaml

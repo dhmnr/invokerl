@@ -36,3 +36,12 @@ logging:
   eval_every: 100
   save_every: 500
   output_dir: ./checkpoints/grpo_gsm8k
+
+# Profiling (opt-in). When enabled: true, `uv run invokerl --config ...` runs
+# N warmup+measured steps instead of full training and writes a phase
+# breakdown + roofline to output_dir. Also available via --profile on the CLI.
+profiling:
+  enabled: false
+  num_steps: 3                  # number of measured steps (+ 1 warmup)
+  perfetto: false               # also export results/profile/trace.json
+  output_dir: results/profile
