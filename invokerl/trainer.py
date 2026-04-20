@@ -30,6 +30,151 @@ from invokerl.rewards.base import BaseReward
 logger = logging.getLogger(__name__)
 
 
+# ============================================================================
+# RolloutSource — abstracts where training batches come from
+# ============================================================================
+# Three variants, same interface:
+#   - SyncRollout: blocking rollout() on the main thread (single-GPU)
+#   - AsyncRollout: pulls pre-generated batches from a DisaggPipeline queue
+#   - DistributedRollout: same as AsyncRollout but rank 0 produces and the
+#     rest receive via broadcast (FSDP multi-GPU)
+#
+# The unified Trainer.train() calls source.next() and doesn't care which.
+
+
+class _SyncRollout:
+    """Synchronous rollout on the training thread. Used when pipeline is None."""
+
+    def __init__(self, trainer):
+        self._trainer = trainer
+
+    def start(self) -> None:
+        pass
+
+    def next(self) -> RolloutBatch | None:
+        prompts = self._trainer.dataset.sample(self._trainer.config.batch_size)
+        return self._trainer.rollout(prompts)
+
+    def stop(self) -> dict:
+        return {}
+
+    @property
+    def weight_version(self) -> int:
+        return self._trainer._weight_version
+
+    def step_version(self) -> None:
+        # Sync mode: optimizer_step() already incremented _weight_version.
+        pass
+
+    def sync_weights_if_due(self, state_dict) -> float:
+        # Sync mode: optimizer_step() already copied weights to vLLM.
+        return 0.0
+
+    @property
+    def vllm_lock(self):
+        return None  # no concurrent vLLM access in sync mode
+
+
+class _AsyncRollout:
+    """Async rollout via DisaggPipeline. Pipeline owns the background gen thread."""
+
+    def __init__(self, pipeline):
+        self._pipeline = pipeline
+
+    def start(self, initial_state_dict=None) -> None:
+        self._pipeline.start(initial_state_dict=initial_state_dict)
+
+    def next(self) -> RolloutBatch | None:
+        batch = self._pipeline.get_batch()
+        if batch is None:
+            self._pipeline.check_health()
+        return batch
+
+    def stop(self) -> dict:
+        return self._pipeline.stop()
+
+    @property
+    def weight_version(self) -> int:
+        return self._pipeline.weight_version
+
+    def step_version(self) -> None:
+        self._pipeline.step_version()
+
+    def sync_weights_if_due(self, state_dict) -> float:
+        if self._pipeline.should_sync():
+            self._pipeline.sync_weights(state_dict)
+            return self._pipeline.last_sync_ms
+        return 0.0
+
+    @property
+    def vllm_lock(self):
+        return self._pipeline._vllm_lock
+
+    @property
+    def queue_size(self) -> int:
+        return self._pipeline._queue.qsize()
+
+
+class _DistributedRollout:
+    """FSDP + async: rank 0 produces, others receive via broadcast."""
+
+    def __init__(self, pipeline, rank: int, device):
+        self._pipeline = pipeline  # only non-None on rank 0
+        self._rank = rank
+        self._device = device
+
+    def start(self, initial_state_dict=None) -> None:
+        if self._rank == 0:
+            self._pipeline.start(initial_state_dict=initial_state_dict)
+
+    def next(self) -> RolloutBatch | None:
+        from invokerl.distributed import broadcast_batch
+        if self._rank == 0:
+            batch = self._pipeline.get_batch()
+            if batch is None:
+                self._pipeline.check_health()
+        else:
+            batch = None
+        return broadcast_batch(batch, src=0, device=self._device)
+
+    def stop(self) -> dict:
+        if self._rank == 0:
+            return self._pipeline.stop()
+        return {}
+
+    @property
+    def weight_version(self) -> int:
+        return self._pipeline.weight_version if self._rank == 0 else 0
+
+    def step_version(self) -> None:
+        if self._rank == 0:
+            self._pipeline.step_version()
+
+    def sync_weights_if_due(self, state_dict) -> float:
+        # All ranks must participate in the FSDP allgather (caller of
+        # this function is expected to have already produced state_dict
+        # collectively). Rank 0 decides whether to actually sync, then
+        # broadcasts the decision so every rank's control flow matches.
+        if self._rank == 0:
+            should = self._pipeline.should_sync()
+            flag = torch.tensor([1 if should else 0], device=self._device)
+        else:
+            flag = torch.tensor([0], device=self._device)
+        torch.distributed.broadcast(flag, src=0)
+        if flag.item() and self._rank == 0:
+            self._pipeline.sync_weights(state_dict)
+            return self._pipeline.last_sync_ms
+        return 0.0
+
+    @property
+    def vllm_lock(self):
+        return self._pipeline._vllm_lock if self._rank == 0 else None
+
+    @property
+    def queue_size(self) -> int:
+        return self._pipeline._queue.qsize() if self._rank == 0 else 0
+
+
 @dataclass
 class TrainerConfig:
     """Training hyperparameters."""
@@ -382,164 +527,95 @@ class Trainer:
             return state["step"]
         return 0
 
-    # -- Public entry point ----------------------------------------------------
+    # -- Main training loop (unified across all modes) -------------------------
 
     def train(
         self,
         resume_from: str | None = None,
         pipeline=None,
     ) -> list[dict]:
-        """Run the full training loop.
+        """Run the full training loop. Seamless across single-GPU / disagg / FSDP.
 
-        Seamless across modes: dispatches based on what you pass in.
+            trainer.train()                       # single GPU
+            trainer.train(pipeline=disagg_pipe)   # async disagg, or disagg+FSDP
 
-            trainer.train()                       # single-GPU / standard
-            trainer.train(pipeline=disagg_pipe)   # async disagg (or disagg + FSDP)
-
-        Args:
-            resume_from: Optional checkpoint directory to resume from.
-            pipeline: Optional DisaggPipeline for async generation. When given,
-                the Trainer consumes pre-generated batches instead of running
-                its own rollout loop. FSDP is auto-detected from the policy.
+        Mode is inferred from what you pass: no pipeline → sync; pipeline +
+        FSDP-wrapped policy → distributed disagg; pipeline only → disagg.
         """
-        if pipeline is None:
-            return self._train_standard(resume_from)
-        # Disagg mode: FSDP vs. non-FSDP is inferred from the policy.
-        if getattr(self.policy, "_fsdp_wrapped", False):
-            return self._train_disagg_distributed(pipeline, resume_from)
-        return self._train_disagg(pipeline, resume_from)
-
-    # -- Standard (single-GPU) loop --------------------------------------------
-
-    def _train_standard(self, resume_from: str | None = None) -> list[dict]:
-        """Synchronous single-GPU training loop."""
         cfg = self.config
-        start_step = 0
 
-        if resume_from:
+        # -- Mode detection ----------------------------------------------------
+        is_fsdp = getattr(self.policy, "_fsdp_wrapped", False)
+        if pipeline is None:
+            source = _SyncRollout(self)
+            rank, world_size, is_main = 0, 1, True
+        elif is_fsdp:
+            from invokerl.distributed import barrier, get_rank, get_world_size, is_main_rank
+            rank, world_size = get_rank(), get_world_size()
+            is_main = is_main_rank()
+            # Only rank 0 owns the pipeline; other ranks pass through broadcast.
+            source = _DistributedRollout(
+                pipeline if is_main else None, rank, self.policy.device,
+            )
+        else:
+            source = _AsyncRollout(pipeline)
+            rank, world_size, is_main = 0, 1, True
+
+        # Tell optimizer_step() to skip auto weight sync when a pipeline
+        # is providing its own (possibly async) sync.
+        self._disagg_mode = pipeline is not None
+
+        # -- Resume ------------------------------------------------------------
+        start_step = 0
+        if resume_from and is_main:
             start_step = self.load_checkpoint(resume_from)
             logger.info("Resumed from step %d", start_step)
-            self.generator.update_weights(self.policy.get_state_dict())
+            if pipeline is None:
+                # In sync mode, resync loaded weights to vLLM.
+                self.generator.update_weights(self.policy.get_state_dict())
 
-        # Baseline eval
-        eval_metrics = self.evaluate()
-        if eval_metrics:
-            logger.info("Baseline: %d/%d = %.1f%%",
-                        eval_metrics["eval_correct"], eval_metrics["eval_total"],
-                        eval_metrics["eval_accuracy"] * 100)
+        if is_fsdp:
+            start_step_t = torch.tensor([start_step], device=self.policy.device)
+            torch.distributed.broadcast(start_step_t, src=0)
+            start_step = int(start_step_t.item())
 
-        logger.info("Starting training: %d steps, accum=%d, group_size=%d",
-                    cfg.total_steps, cfg.accumulation_steps, cfg.group_size)
+        # -- Baseline eval (rank 0 only) --------------------------------------
+        if is_main:
+            eval_metrics = self.evaluate()
+            if eval_metrics:
+                logger.info("Baseline: %d/%d = %.1f%%",
+                            eval_metrics["eval_correct"], eval_metrics["eval_total"],
+                            eval_metrics["eval_accuracy"] * 100)
 
-        for step in range(start_step, cfg.total_steps):
-            t0 = time.time()
-            self.step = step
-            self.algorithm.on_step_start(step)
+        if is_fsdp:
+            from invokerl.distributed import barrier as _barrier
+            _barrier()
 
-            accumulated_metrics: dict[str, list[float]] = {}
-            self.optimizer.zero_grad()
+        # -- Start async pipeline (if any) ------------------------------------
+        if pipeline is not None:
+            # FSDP: all ranks must participate in get_state_dict() (allgather);
+            # only rank 0 uses the result. Non-FSDP: just rank 0.
+            initial_state = self.policy.get_state_dict() if (is_fsdp or is_main) else None
+            if is_main:
+                source.start(initial_state_dict=initial_state)
+            else:
+                source.start()  # no-op for non-rank-0 in _DistributedRollout
+            del initial_state
+            if is_fsdp:
+                _barrier()
 
-            staleness_values: list[int] = []
-            for _ in range(cfg.accumulation_steps):
-                prompts = self.dataset.sample(cfg.batch_size)
-                batch = self.rollout(prompts)
-                staleness_values.append(self._weight_version - batch.weight_version)
-                loss, metrics = self.train_step(batch)
+        mode_label = (
+            "single GPU" if pipeline is None
+            else f"disagg+FSDP (world={world_size})" if is_fsdp
+            else "disagg"
+        )
+        if is_main:
+            logger.info(
+                "Starting training [%s]: %d steps, accum=%d, group_size=%d",
+                mode_label, cfg.total_steps, cfg.accumulation_steps, cfg.group_size,
+            )
 
-                del batch, loss
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-
-                for k, v in metrics.items():
-                    accumulated_metrics.setdefault(k, []).append(v)
-
-            grad_norm = self.optimizer_step()
-            dt = time.time() - t0
-
-            step_metrics = {k: sum(v) / len(v) for k, v in accumulated_metrics.items()}
-            avg_staleness = sum(staleness_values) / len(staleness_values) if staleness_values else 0.0
-            max_staleness = max(staleness_values) if staleness_values else 0
-            step_metrics.update({
-                "step": step, "grad_norm": grad_norm,
-                "lr": self.scheduler.get_last_lr()[0], "time": dt,
-                "staleness": avg_staleness,
-                "staleness_max": max_staleness,
-                "weight_version": self._weight_version,
-            })
-
-            self.algorithm.on_step_end(step, step_metrics)
-            self.history.append(step_metrics)
-
-            if step % cfg.log_every == 0 or step == start_step:
-                logger.info(
-                    "[step %4d] loss=%.4f reward=%.3f kl=%.4f gnorm=%.2f lr=%.2e time=%.1fs",
-                    step, step_metrics.get("loss", 0), step_metrics.get("reward", 0),
-                    step_metrics.get("kl", 0), grad_norm, step_metrics["lr"], dt,
-                )
-
-            if cfg.eval_every > 0 and (step + 1) % cfg.eval_every == 0:
-                eval_metrics = self.evaluate()
-                if eval_metrics:
-                    logger.info("--- Eval step %d: %d/%d = %.1f%%",
-                                step + 1, eval_metrics["eval_correct"],
-                                eval_metrics["eval_total"], eval_metrics["eval_accuracy"] * 100)
-                    step_metrics.update(eval_metrics)
-
-            if cfg.save_every > 0 and (step + 1) % cfg.save_every == 0:
-                self.save_checkpoint(step + 1)
-
-        # Final eval + checkpoint
-        final_eval = self.evaluate()
-        if final_eval:
-            logger.info("Final: %d/%d = %.1f%%",
-                        final_eval["eval_correct"], final_eval["eval_total"],
-                        final_eval["eval_accuracy"] * 100)
-
-        self.save_checkpoint(cfg.total_steps)
-
-        with open(os.path.join(cfg.output_dir, "training_history.json"), "w") as f:
-            json.dump(self.history, f, indent=2)
-
-        return self.history
-
-    # -- Disaggregated training loop -------------------------------------------
-
-    def _train_disagg(
-        self,
-        pipeline,  # DisaggPipeline — imported lazily to avoid circular deps
-        resume_from: str | None = None,
-    ) -> list[dict]:
-        """Train using the async disaggregated pipeline.
-
-        Generation runs in a background thread on a separate GPU.
-        This method consumes pre-generated batches from the pipeline queue,
-        trains, and periodically syncs weights back to the generation engine.
-        """
-        cfg = self.config
-        start_step = 0
-
-        # Tell optimizer_step() to skip auto weight sync — pipeline handles it.
-        self._disagg_mode = True
-
-        if resume_from:
-            start_step = self.load_checkpoint(resume_from)
-            logger.info("Resumed from step %d (disagg mode)", start_step)
-
-        # Baseline eval BEFORE starting gen thread — vLLM is not thread-safe.
-        eval_metrics = self.evaluate()
-        if eval_metrics:
-            logger.info("Baseline: %d/%d = %.1f%%",
-                        eval_metrics["eval_correct"], eval_metrics["eval_total"],
-                        eval_metrics["eval_accuracy"] * 100)
-
-        # Start the async generation thread.
-        pipeline.start(initial_state_dict=self.policy.get_state_dict())
-
-        logger.info("Starting disagg training: %d steps, accum=%d, group_size=%d, "
-                    "sync_every=%d, buffer=%d",
-                    cfg.total_steps, cfg.accumulation_steps, cfg.group_size,
-                    pipeline.config.sync_every, pipeline.config.buffer_size)
-
+        # -- Main loop ---------------------------------------------------------
         try:
             for step in range(start_step, cfg.total_steps):
                 t0 = time.time()
@@ -551,208 +627,16 @@ class Trainer:
 
                 staleness_values: list[int] = []
                 t_wait, t_train = 0.0, 0.0
+
                 for _ in range(cfg.accumulation_steps):
                     tw0 = time.time()
-                    batch = pipeline.get_batch()
+                    batch = source.next()
                     t_wait += time.time() - tw0
                     if batch is None:
-                        pipeline.check_health()
-                        logger.error("Pipeline returned None at step %d", step)
+                        logger.error("Rollout returned None at step %d", step)
                         break
 
-                    staleness = pipeline.weight_version - batch.weight_version
-                    staleness_values.append(staleness)
-                    tt0 = time.time()
-                    loss, metrics = self.train_step(batch)
-                    t_train += time.time() - tt0
-
-                    del batch, loss
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-
-                    for k, v in metrics.items():
-                        accumulated_metrics.setdefault(k, []).append(v)
-
-                to0 = time.time()
-                grad_norm = self.optimizer_step()
-                t_optim = time.time() - to0
-                pipeline.step_version()
-
-                # Periodic weight sync (non-blocking — gen thread applies it).
-                sync_ms = 0.0
-                if pipeline.should_sync():
-                    pipeline.sync_weights(self.policy.get_state_dict())
-                    sync_ms = pipeline.last_sync_ms  # from previous sync
-
-                dt = time.time() - t0
-
-                step_metrics = {k: sum(v) / len(v) for k, v in accumulated_metrics.items()}
-                avg_staleness = sum(staleness_values) / len(staleness_values) if staleness_values else 0.0
-                max_staleness = max(staleness_values) if staleness_values else 0
-                # Use pipeline.weight_version as single source of truth.
-                wv = pipeline.weight_version
-                step_metrics.update({
-                    "step": step, "grad_norm": grad_norm,
-                    "lr": self.scheduler.get_last_lr()[0], "time": dt,
-                    "staleness": avg_staleness,
-                    "staleness_max": max_staleness,
-                    "weight_version": wv,
-                    "sync_ms": sync_ms,
-                    "queue_size": pipeline._queue.qsize(),
-                    "t_wait": t_wait,
-                    "t_train": t_train,
-                    "t_optim": t_optim,
-                })
-
-                self.algorithm.on_step_end(step, step_metrics)
-                self.history.append(step_metrics)
-
-                if step % cfg.log_every == 0 or step == start_step:
-                    logger.info(
-                        "[step %4d] loss=%.4f reward=%.3f kl=%.4f gnorm=%.2f "
-                        "lr=%.2e time=%.1fs [wait=%.1fs train=%.1fs optim=%.1fs] "
-                        "stale=%.1f sync=%.0fms q=%d",
-                        step, step_metrics.get("loss", 0), step_metrics.get("reward", 0),
-                        step_metrics.get("kl", 0), grad_norm, step_metrics["lr"],
-                        dt, t_wait, t_train, t_optim,
-                        avg_staleness, sync_ms, pipeline._queue.qsize(),
-                    )
-
-                if cfg.eval_every > 0 and (step + 1) % cfg.eval_every == 0:
-                    # Hold vLLM lock during eval to prevent concurrent vLLM access
-                    # (vLLM's LLM class is not thread-safe).
-                    with pipeline._vllm_lock:
-                        eval_metrics = self.evaluate()
-                    if eval_metrics:
-                        logger.info("--- Eval step %d: %d/%d = %.1f%%",
-                                    step + 1, eval_metrics["eval_correct"],
-                                    eval_metrics["eval_total"], eval_metrics["eval_accuracy"] * 100)
-                        step_metrics.update(eval_metrics)
-
-                if cfg.save_every > 0 and (step + 1) % cfg.save_every == 0:
-                    # Hold vLLM lock during save to prevent the gen thread
-                    # from doing concurrent CUDA copies (weight sync) while
-                    # we're copying model/optimizer tensors to CPU. Concurrent
-                    # cross-device copies from cuda:1 cause launch failures.
-                    with pipeline._vllm_lock:
-                        self.save_checkpoint(step + 1)
-
-        finally:
-            pipeline_stats = pipeline.stop()
-            logger.info("Pipeline stats: %s", pipeline_stats)
-
-        # Final eval + checkpoint.
-        final_eval = self.evaluate()
-        if final_eval:
-            logger.info("Final: %d/%d = %.1f%%",
-                        final_eval["eval_correct"], final_eval["eval_total"],
-                        final_eval["eval_accuracy"] * 100)
-
-        self.save_checkpoint(cfg.total_steps)
-
-        with open(os.path.join(cfg.output_dir, "training_history.json"), "w") as f:
-            json.dump(self.history, f, indent=2)
-
-        return self.history
-
-    # -- Distributed disaggregated training (FSDP) -----------------------------
-
-    def _train_disagg_distributed(
-        self,
-        pipeline,  # DisaggPipeline — only on rank 0, None on other ranks
-        resume_from: str | None = None,
-    ) -> list[dict]:
-        """Train with FSDP across multiple GPUs + async disaggregated pipeline.
-
-        Only rank 0 runs the generation pipeline and broadcasts batches to
-        other ranks. All ranks participate in FSDP forward/backward/allreduce.
-        Only rank 0 syncs weights back to vLLM.
-
-        Launch via: torchrun --nproc_per_node=M -m invokerl.train --disagg --fsdp
-        """
-        from invokerl.distributed import (
-            barrier,
-            broadcast_batch,
-            get_rank,
-            get_world_size,
-            is_main_rank,
-        )
-
-        cfg = self.config
-        rank = get_rank()
-        world_size = get_world_size()
-        start_step = 0
-
-        self._disagg_mode = True
-
-        if resume_from and is_main_rank():
-            start_step = self.load_checkpoint(resume_from)
-            logger.info("Resumed from step %d (distributed disagg, rank %d)", start_step, rank)
-
-        # Broadcast start_step from rank 0 so all ranks agree.
-        start_step_t = torch.tensor([start_step], device=self.policy.device)
-        torch.distributed.broadcast(start_step_t, src=0)
-        start_step = int(start_step_t.item())
-
-        # Baseline eval — only rank 0 (owns generator).
-        if is_main_rank():
-            eval_metrics = self.evaluate()
-            if eval_metrics:
-                logger.info("Baseline: %d/%d = %.1f%%",
-                            eval_metrics["eval_correct"], eval_metrics["eval_total"],
-                            eval_metrics["eval_accuracy"] * 100)
-
-        barrier()
-
-        # All ranks must participate in get_state_dict() — FSDP does an
-        # allgather internally to reconstruct the full parameter tensors.
-        # Only rank 0 feeds the result to the pipeline.
-        initial_state_dict = self.policy.get_state_dict()
-
-        if is_main_rank():
-            pipeline.start(initial_state_dict=initial_state_dict)
-            logger.info(
-                "Starting distributed disagg: %d steps, accum=%d, group=%d, "
-                "ranks=%d, sync_every=%d",
-                cfg.total_steps, cfg.accumulation_steps, cfg.group_size,
-                world_size, pipeline.config.sync_every,
-            )
-
-        del initial_state_dict  # free non-rank-0 copies
-
-        barrier()
-
-        try:
-            for step in range(start_step, cfg.total_steps):
-                t0 = time.time()
-                self.step = step
-                self.algorithm.on_step_start(step)
-
-                accumulated_metrics: dict[str, list[float]] = {}
-                self.optimizer.zero_grad()
-
-                staleness_values: list[int] = []
-                t_wait, t_train, t_bcast = 0.0, 0.0, 0.0
-
-                for _ in range(cfg.accumulation_steps):
-                    # Rank 0: pull from pipeline. All ranks: broadcast.
-                    tw0 = time.time()
-                    if is_main_rank():
-                        batch = pipeline.get_batch()
-                        if batch is None:
-                            pipeline.check_health()
-                            logger.error("Pipeline returned None at step %d", step)
-                            break
-                        staleness = pipeline.weight_version - batch.weight_version
-                        staleness_values.append(staleness)
-                    else:
-                        batch = None
-                    t_wait += time.time() - tw0
-
-                    # Broadcast batch from rank 0 to all ranks.
-                    tb0 = time.time()
-                    batch = broadcast_batch(batch, src=0, device=self.policy.device)
-                    t_bcast += time.time() - tb0
+                    staleness_values.append(source.weight_version - batch.weight_version)
 
                     tt0 = time.time()
                     loss, metrics = self.train_step(batch)
@@ -769,78 +653,59 @@ class Trainer:
                 grad_norm = self.optimizer_step()
                 t_optim = time.time() - to0
 
-                # FSDP weight sync: all ranks must participate in the
-                # allgather even though only rank 0 uses the result.
-                # Rank 0 decides whether to sync, broadcasts the decision.
-                if is_main_rank():
-                    pipeline.step_version()
-                    should_sync = pipeline.should_sync()
-                    do_sync = torch.tensor(
-                        [1 if should_sync else 0], device=self.policy.device,
-                    )
-                else:
-                    do_sync = torch.tensor([0], device=self.policy.device)
-                torch.distributed.broadcast(do_sync, src=0)
+                source.step_version()
 
+                # Post-step weight sync (async modes). For FSDP the state_dict
+                # call is itself an allgather — ALL ranks must participate.
                 sync_ms = 0.0
-                if do_sync.item():
-                    # All ranks participate in FSDP allgather.
+                if pipeline is not None:
                     state_dict = self.policy.get_state_dict()
-                    if is_main_rank():
-                        pipeline.sync_weights(state_dict)
-                        sync_ms = pipeline.last_sync_ms
+                    sync_ms = source.sync_weights_if_due(state_dict)
+                    del state_dict
 
                 dt = time.time() - t0
 
-                # Logging and eval — rank 0 only.
-                if is_main_rank():
-                    step_metrics = {
-                        k: sum(v) / len(v)
-                        for k, v in accumulated_metrics.items()
-                    }
-                    avg_staleness = (
-                        sum(staleness_values) / len(staleness_values)
-                        if staleness_values else 0.0
-                    )
-                    max_staleness = (
-                        max(staleness_values) if staleness_values else 0
-                    )
-                    wv = pipeline.weight_version
+                # -- Logging / eval / checkpoint (rank 0 only) -----------------
+                if is_main:
+                    step_metrics = {k: sum(v) / len(v) for k, v in accumulated_metrics.items()}
+                    avg_stale = (sum(staleness_values) / len(staleness_values)
+                                 if staleness_values else 0.0)
+                    max_stale = max(staleness_values) if staleness_values else 0
                     step_metrics.update({
                         "step": step,
                         "grad_norm": float(grad_norm),
                         "lr": self.scheduler.get_last_lr()[0],
                         "time": dt,
-                        "staleness": avg_staleness,
-                        "staleness_max": max_staleness,
-                        "weight_version": wv,
-                        "sync_ms": sync_ms,
-                        "queue_size": pipeline._queue.qsize(),
-                        "t_wait": t_wait,
-                        "t_train": t_train,
-                        "t_bcast": t_bcast,
-                        "t_optim": t_optim,
-                        "world_size": world_size,
+                        "staleness": avg_stale,
+                        "staleness_max": max_stale,
+                        "weight_version": source.weight_version,
                     })
+                    if pipeline is not None:
+                        step_metrics.update({
+                            "t_wait": t_wait, "t_train": t_train, "t_optim": t_optim,
+                            "sync_ms": sync_ms, "queue_size": source.queue_size,
+                        })
+                    if is_fsdp:
+                        step_metrics["world_size"] = world_size
 
                     self.algorithm.on_step_end(step, step_metrics)
                     self.history.append(step_metrics)
 
                     if step % cfg.log_every == 0 or step == start_step:
+                        extra = (
+                            f" [wait={t_wait:.1f}s train={t_train:.1f}s optim={t_optim:.1f}s]"
+                            f" stale={avg_stale:.1f} sync={sync_ms:.0f}ms q={source.queue_size}"
+                            if pipeline is not None else ""
+                        )
                         logger.info(
-                            "[step %4d] loss=%.4f reward=%.3f gnorm=%.2f "
-                            "lr=%.2e time=%.1fs [wait=%.1fs train=%.1fs "
-                            "bcast=%.2fs optim=%.1fs] stale=%.1f q=%d",
-                            step, step_metrics.get("loss", 0),
-                            step_metrics.get("reward", 0), float(grad_norm),
-                            step_metrics["lr"], dt, t_wait, t_train,
-                            t_bcast, t_optim, avg_staleness,
-                            pipeline._queue.qsize(),
+                            "[step %4d] loss=%.4f reward=%.3f kl=%.4f gnorm=%.2f lr=%.2e time=%.1fs%s",
+                            step, step_metrics.get("loss", 0), step_metrics.get("reward", 0),
+                            step_metrics.get("kl", 0), float(grad_norm),
+                            step_metrics["lr"], dt, extra,
                         )
 
                     if cfg.eval_every > 0 and (step + 1) % cfg.eval_every == 0:
-                        with pipeline._vllm_lock:
-                            eval_metrics = self.evaluate()
+                        eval_metrics = self._locked_evaluate(source.vllm_lock)
                         if eval_metrics:
                             logger.info(
                                 "--- Eval step %d: %d/%d = %.1f%%",
@@ -850,38 +715,53 @@ class Trainer:
                             )
                             step_metrics.update(eval_metrics)
 
-                # save_checkpoint() calls get_state_dict() which is an FSDP
-                # collective — ALL ranks must participate. Moved outside
-                # is_main_rank() guard to prevent allgather deadlock.
+                # Checkpoint (FSDP: all ranks must participate in get_state_dict).
                 if cfg.save_every > 0 and (step + 1) % cfg.save_every == 0:
-                    if pipeline is not None:
-                        with pipeline._vllm_lock:
-                            self.save_checkpoint(step + 1)
-                    else:
-                        self.save_checkpoint(step + 1)
+                    self._locked_save_checkpoint(step + 1, source.vllm_lock)
 
-                # All ranks sync at end of step.
-                barrier()
+                if is_fsdp:
+                    _barrier()
 
         finally:
-            if is_main_rank():
-                pipeline_stats = pipeline.stop()
-                logger.info("Pipeline stats: %s", pipeline_stats)
+            stats = source.stop()
+            if stats and is_main:
+                logger.info("Pipeline stats: %s", stats)
 
-        if is_main_rank():
+        # -- Final eval + checkpoint ------------------------------------------
+        if is_main:
             final_eval = self.evaluate()
             if final_eval:
                 logger.info("Final: %d/%d = %.1f%%",
                             final_eval["eval_correct"], final_eval["eval_total"],
                             final_eval["eval_accuracy"] * 100)
 
-        # save_checkpoint() calls get_state_dict() which is an FSDP collective —
-        # ALL ranks must participate. Only rank 0 writes files to disk.
         self.save_checkpoint(cfg.total_steps)
 
-        if is_main_rank():
+        if is_main:
             with open(os.path.join(cfg.output_dir, "training_history.json"), "w") as f:
                 json.dump(self.history, f, indent=2)
 
-        barrier()
+        if is_fsdp:
+            _barrier()
         return self.history
+
+    # -- Helpers used by the unified loop --------------------------------------
+
+    def _locked_evaluate(self, lock) -> dict[str, float]:
+        """Run evaluate() under the vLLM lock if one is provided (disagg mode)."""
+        if lock is None:
+            return self.evaluate()
+        with lock:
+            return self.evaluate()
+
+    def _locked_save_checkpoint(self, step: int, lock) -> None:
+        """Save checkpoint under the vLLM lock if provided.
+
+        In disagg mode, holding the lock prevents the gen thread from doing
+        concurrent CUDA copies (weight sync) while we copy tensors to CPU.
+        """
+        if lock is None:
+            self.save_checkpoint(step)
+        else:
+            with lock:
+                self.save_checkpoint(step)

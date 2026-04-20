@@ -40,10 +40,8 @@ def main():
 
     # Policy + ref policy live on GPU 1
     policy = rl.Policy(MODEL, device=TRAIN_DEVICE, dtype=torch.bfloat16)
-    ref_policy = rl.Policy(MODEL, device=GEN_DEVICE, dtype=torch.bfloat16)  # ref on gen GPU
-    ref_policy.model.eval()
-    for p in ref_policy.model.parameters():
-        p.requires_grad = False
+    # Ref policy lives on gen GPU (frozen, used for KL penalty)
+    ref_policy = rl.Policy(MODEL, device=GEN_DEVICE, dtype=torch.bfloat16).freeze()
 
     trainer = rl.Trainer(
         config=rl.TrainerConfig(

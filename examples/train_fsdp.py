@@ -58,10 +58,7 @@ def main():
     # --- Reference policy (only on rank 0, on gen GPU) ------------------------
     ref_policy = None
     if local_rank == 0:
-        ref_policy = rl.Policy(MODEL, device=GEN_DEVICE, dtype=torch.bfloat16)
-        ref_policy.model.eval()
-        for p in ref_policy.model.parameters():
-            p.requires_grad = False
+        ref_policy = rl.Policy(MODEL, device=GEN_DEVICE, dtype=torch.bfloat16).freeze()
 
     # --- Trainer + Disagg pipeline --------------------------------------------
     trainer = rl.Trainer(
