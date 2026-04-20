@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # V1 multiprocessing mode: "0" = in-process (fast weight sync ~2.8ms),
 # "1" = separate process (safetensors sync ~1.6s but isolated NCCL).
@@ -31,22 +31,22 @@ class GenerationConfig:
     top_p: float = 1.0
     stop_strings: list[str] | None = None
     # vLLM-specific
-    gpu_memory_utilization: float = 0.5   # leave room for training
-    enforce_eager: bool = False           # disable CUDA graphs for debugging
+    gpu_memory_utilization: float = 0.5  # leave room for training
+    enforce_eager: bool = False  # disable CUDA graphs for debugging
 
 
 @dataclass
 class GenerationOutput:
     """Output from a generation call."""
 
-    token_ids: Tensor           # [B, T] int64 — prompt + completion, padded
-    prompt_lens: list[int]      # length of each prompt (before completion)
+    token_ids: Tensor  # [B, T] int64 — prompt + completion, padded
+    prompt_lens: list[int]  # length of each prompt (before completion)
     completion_lens: list[int]  # length of each completion
-    log_probs: Tensor           # [B, T] float — per-token log-probs (0 for prompt tokens)
-    texts: list[str]            # decoded completion strings
-    prompt_mask: Tensor         # [B, T] bool
-    response_mask: Tensor       # [B, T] bool
-    attention_mask: Tensor      # [B, T] bool
+    log_probs: Tensor  # [B, T] float — per-token log-probs (0 for prompt tokens)
+    texts: list[str]  # decoded completion strings
+    prompt_mask: Tensor  # [B, T] bool
+    response_mask: Tensor  # [B, T] bool
+    attention_mask: Tensor  # [B, T] bool
 
 
 class BaseGenerator(ABC):
@@ -96,7 +96,11 @@ class VLLMGenerator(BaseGenerator):
             tensor_parallel_size=tensor_parallel_size,
         )
         # Store dtype for weight sync casting (fp32 master weights → bf16 vLLM)
-        _dtype_map = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
+        _dtype_map = {
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+            "float32": torch.float32,
+        }
         self._model_dtype = _dtype_map.get(dtype, torch.bfloat16)
         self.tokenizer = self.llm.get_tokenizer()
         if self.tokenizer.pad_token_id is None:
@@ -108,8 +112,10 @@ class VLLMGenerator(BaseGenerator):
         self._sync_strategy: str | None = None
         if tensor_parallel_size > 1:
             self._sync_strategy = "safetensors"
-            logger.info("TP=%d: using safetensors weight sync (workers are separate processes)",
-                        tensor_parallel_size)
+            logger.info(
+                "TP=%d: using safetensors weight sync (workers are separate processes)",
+                tensor_parallel_size,
+            )
 
         logger.info(
             "VLLMGenerator initialized: model=%s, gpu_mem=%.1f%%, dtype=%s, tp=%d",
@@ -176,7 +182,11 @@ class VLLMGenerator(BaseGenerator):
             all_lps.append(lps)
 
         return self._pack_output(
-            all_ids, all_lps, prompt_lens, completion_lens, texts,
+            all_ids,
+            all_lps,
+            prompt_lens,
+            completion_lens,
+            texts,
         )
 
     def update_weights(self, state_dict: dict[str, Tensor]) -> None:
@@ -232,7 +242,9 @@ class VLLMGenerator(BaseGenerator):
             synced += self._copy_policy_to_vllm(vname, vparam, state_dict)
 
         torch.cuda.synchronize(gen_device)
-        logger.debug("Weight sync: direct GPU copy complete (%d/%d params)", synced, len(vllm_params))
+        logger.debug(
+            "Weight sync: direct GPU copy complete (%d/%d params)", synced, len(vllm_params)
+        )
 
     def _copy_policy_to_vllm(
         self,
@@ -267,8 +279,12 @@ class VLLMGenerator(BaseGenerator):
                 q, k, v = state_dict[q_name], state_dict[k_name], state_dict[v_name]
                 q_size, k_size = q.shape[0], k.shape[0]
                 vparam.data[:q_size].copy_(q.to(dtype=dtype, device=device, non_blocking=True))
-                vparam.data[q_size:q_size + k_size].copy_(k.to(dtype=dtype, device=device, non_blocking=True))
-                vparam.data[q_size + k_size:].copy_(v.to(dtype=dtype, device=device, non_blocking=True))
+                vparam.data[q_size : q_size + k_size].copy_(
+                    k.to(dtype=dtype, device=device, non_blocking=True)
+                )
+                vparam.data[q_size + k_size :].copy_(
+                    v.to(dtype=dtype, device=device, non_blocking=True)
+                )
                 return 1
             return 0
 
@@ -279,7 +295,9 @@ class VLLMGenerator(BaseGenerator):
             if gate_name in state_dict and up_name in state_dict:
                 gate, up = state_dict[gate_name], state_dict[up_name]
                 gate_size = gate.shape[0]
-                vparam.data[:gate_size].copy_(gate.to(dtype=dtype, device=device, non_blocking=True))
+                vparam.data[:gate_size].copy_(
+                    gate.to(dtype=dtype, device=device, non_blocking=True)
+                )
                 vparam.data[gate_size:].copy_(up.to(dtype=dtype, device=device, non_blocking=True))
                 return 1
             return 0
@@ -301,8 +319,7 @@ class VLLMGenerator(BaseGenerator):
         tmp_dir = tempfile.mkdtemp(prefix="invokerl_ws_", dir=shm_dir)
         try:
             cpu_state = {
-                k: v.to(dtype=self._model_dtype).cpu().contiguous()
-                for k, v in state_dict.items()
+                k: v.to(dtype=self._model_dtype).cpu().contiguous() for k, v in state_dict.items()
             }
             save_file(cpu_state, os.path.join(tmp_dir, "model.safetensors"))
 
@@ -329,9 +346,9 @@ class VLLMGenerator(BaseGenerator):
         from vllm import SamplingParams
 
         params = SamplingParams(
-            max_tokens=1,         # must generate ≥1 token for vLLM
+            max_tokens=1,  # must generate ≥1 token for vLLM
             temperature=1.0,
-            prompt_logprobs=1,    # return log-probs for each prompt token
+            prompt_logprobs=1,  # return log-probs for each prompt token
         )
 
         # Build token ID lists (strip padding)
@@ -418,11 +435,12 @@ class VLLMGenerator(BaseGenerator):
             token_ids[i, :seq_len] = torch.tensor(all_ids[i], dtype=torch.long)
             lp_len = min(len(all_lps[i]), max_len)
             log_probs[i, :lp_len] = torch.tensor(
-                all_lps[i][:lp_len], dtype=torch.float32,
+                all_lps[i][:lp_len],
+                dtype=torch.float32,
             )
-            prompt_mask[i, :prompt_lens[i]] = True
+            prompt_mask[i, : prompt_lens[i]] = True
             pl, cl = prompt_lens[i], completion_lens[i]
-            response_mask[i, pl:pl + cl] = True
+            response_mask[i, pl : pl + cl] = True
             attention_mask[i, :seq_len] = True
 
         return GenerationOutput(

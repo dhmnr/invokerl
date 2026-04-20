@@ -41,11 +41,11 @@ logger = logging.getLogger(__name__)
 class PipelineConfig:
     """Disaggregated pipeline settings."""
 
-    gen_device: str = "cuda:0"       # GPU for vLLM generation
-    train_device: str = "cuda:1"     # GPU for policy training
-    sync_every: int = 1              # sync weights every N optimizer steps
-    buffer_size: int = 2             # max batches in queue (double buffer)
-    max_staleness: int = 0           # drop batches staler than this (0 = no limit)
+    gen_device: str = "cuda:0"  # GPU for vLLM generation
+    train_device: str = "cuda:1"  # GPU for policy training
+    sync_every: int = 1  # sync weights every N optimizer steps
+    buffer_size: int = 2  # max batches in queue (double buffer)
+    max_staleness: int = 0  # drop batches staler than this (0 = no limit)
 
 
 class DisaggPipeline:
@@ -179,7 +179,9 @@ class DisaggPipeline:
         self._last_sync_ms = dt_ms
         logger.debug(
             "Weight sync #%d: %.1fms (version %d → gen)",
-            self.syncs_done, dt_ms, self._gen_version,
+            self.syncs_done,
+            dt_ms,
+            self._gen_version,
         )
 
     @torch.no_grad()
@@ -199,14 +201,17 @@ class DisaggPipeline:
 
         t0 = time.perf_counter()
         rewards = self.reward_fn.score_batch(
-            expanded_prompts, gen_out.texts, ground_truths=expanded_truths,
+            expanded_prompts,
+            gen_out.texts,
+            ground_truths=expanded_truths,
         ).to(gen_out.token_ids.device)
         self._t_reward += time.perf_counter() - t0
 
         t0 = time.perf_counter()
         if self.ref_policy is not None:
             ref_log_probs = self.ref_policy.forward_no_grad(
-                gen_out.token_ids, gen_out.attention_mask,
+                gen_out.token_ids,
+                gen_out.attention_mask,
             )
         elif self.use_vllm_ref:
             # Use vLLM to compute ref log-probs instead of a separate model.
@@ -216,14 +221,16 @@ class DisaggPipeline:
             # generation-time weights (staleness ≤ sync_every steps).
             with self._vllm_lock:
                 ref_log_probs = self.generator.compute_log_probs(
-                    gen_out.token_ids, gen_out.attention_mask,
+                    gen_out.token_ids,
+                    gen_out.attention_mask,
                 )
         else:
             ref_log_probs = gen_out.log_probs.clone()
         self._t_ref += time.perf_counter() - t0
 
         group_ids = torch.arange(
-            B, device=gen_out.token_ids.device,
+            B,
+            device=gen_out.token_ids.device,
         ).repeat_interleave(G)
 
         return RolloutBatch(
@@ -268,7 +275,9 @@ class DisaggPipeline:
         if self.config.max_staleness > 0 and staleness > self.config.max_staleness:
             self.batches_dropped += 1
             logger.debug(
-                "Dropped batch (staleness %d > max %d)", staleness, self.config.max_staleness,
+                "Dropped batch (staleness %d > max %d)",
+                staleness,
+                self.config.max_staleness,
             )
             return self.get_batch(timeout)
 
@@ -300,7 +309,9 @@ class DisaggPipeline:
         self._last_sync_ms = dt_ms
         logger.debug(
             "Weight sync #%d: %.1fms (version %d → gen)",
-            self.syncs_done, dt_ms, self._weight_version,
+            self.syncs_done,
+            dt_ms,
+            self._weight_version,
         )
         return dt_ms
 
@@ -340,7 +351,9 @@ class DisaggPipeline:
 
         self._stop.clear()
         self._gen_thread = threading.Thread(
-            target=self._gen_loop, name="invokerl-gen", daemon=True,
+            target=self._gen_loop,
+            name="invokerl-gen",
+            daemon=True,
         )
         self._gen_thread.start()
         logger.info(
@@ -383,8 +396,7 @@ class DisaggPipeline:
         }
 
         logger.info(
-            "Pipeline stopped: gen=%d train=%d dropped=%d syncs=%d "
-            "avg_stale=%.2f max_stale=%d",
+            "Pipeline stopped: gen=%d train=%d dropped=%d syncs=%d avg_stale=%.2f max_stale=%d",
             self.batches_generated,
             self.batches_consumed,
             self.batches_dropped,
@@ -397,6 +409,4 @@ class DisaggPipeline:
     def check_health(self) -> None:
         """Raise if the generation thread has failed."""
         if self._gen_error is not None:
-            raise RuntimeError(
-                f"Generation thread failed: {self._gen_error}"
-            ) from self._gen_error
+            raise RuntimeError(f"Generation thread failed: {self._gen_error}") from self._gen_error

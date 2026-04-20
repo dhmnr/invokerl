@@ -14,21 +14,19 @@ from dataclasses import dataclass
 class PromptItem:
     """A single training prompt with optional ground truth."""
 
-    prompt: str                 # formatted prompt string
-    ground_truth: str | None    # expected answer (for rule-based rewards)
-    metadata: dict | None       # any extra info (source, difficulty, etc.)
+    prompt: str  # formatted prompt string
+    ground_truth: str | None  # expected answer (for rule-based rewards)
+    metadata: dict | None  # any extra info (source, difficulty, etc.)
 
 
 class BaseDataset(ABC):
     """Abstract dataset interface."""
 
     @abstractmethod
-    def __len__(self) -> int:
-        ...
+    def __len__(self) -> int: ...
 
     @abstractmethod
-    def __getitem__(self, idx: int) -> PromptItem:
-        ...
+    def __getitem__(self, idx: int) -> PromptItem: ...
 
     @abstractmethod
     def sample(self, n: int) -> list[PromptItem]:

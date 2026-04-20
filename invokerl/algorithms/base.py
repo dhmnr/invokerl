@@ -16,9 +16,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
-import torch
 from torch import Tensor
-
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -35,24 +33,24 @@ class RolloutBatch:
     """
 
     # Token IDs: prompt + completion, padded to max length
-    token_ids: Tensor               # [B, T] int64
+    token_ids: Tensor  # [B, T] int64
 
     # Masks
-    prompt_mask: Tensor             # [B, T] bool — True for prompt tokens
-    response_mask: Tensor           # [B, T] bool — True for response tokens
-    attention_mask: Tensor          # [B, T] bool — True for non-padding tokens
+    prompt_mask: Tensor  # [B, T] bool — True for prompt tokens
+    response_mask: Tensor  # [B, T] bool — True for response tokens
+    attention_mask: Tensor  # [B, T] bool — True for non-padding tokens
 
     # Rewards — can be sequence-level or token-level
-    rewards: Tensor                 # [B] scalar per-sequence reward
-    token_rewards: Tensor | None    # [B, T] per-token rewards (optional, for credit assignment)
+    rewards: Tensor  # [B] scalar per-sequence reward
+    token_rewards: Tensor | None  # [B, T] per-token rewards (optional, for credit assignment)
 
     # Log-probabilities from generation rollout and reference model
-    old_log_probs: Tensor           # [B, T] from policy at generation time
-    ref_log_probs: Tensor           # [B, T] from frozen reference model
+    old_log_probs: Tensor  # [B, T] from policy at generation time
+    ref_log_probs: Tensor  # [B, T] from frozen reference model
 
     # Group structure (for GRPO-style algorithms)
-    group_ids: Tensor | None        # [B] int — which prompt each completion belongs to
-    group_size: int = 1             # number of completions per prompt
+    group_ids: Tensor | None  # [B] int — which prompt each completion belongs to
+    group_size: int = 1  # number of completions per prompt
 
     # Off-policy tracking: which weight version generated this batch.
     # staleness = current_weight_version - weight_version.

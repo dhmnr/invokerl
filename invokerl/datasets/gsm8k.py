@@ -13,7 +13,6 @@ from datasets import load_dataset
 
 from invokerl.datasets.base import BaseDataset, PromptItem
 
-
 # GSM8K answer format: "#### <number>" at the end of the solution
 _ANSWER_RE = re.compile(r"####\s*(.+)")
 

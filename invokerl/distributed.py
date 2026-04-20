@@ -49,7 +49,9 @@ def init_distributed(backend: str = "nccl", device_id: int | None = None) -> int
     torch.cuda.set_device(device_id)
     logger.info(
         "Distributed init: rank=%d world=%d device=cuda:%d",
-        rank, dist.get_world_size(), device_id,
+        rank,
+        dist.get_world_size(),
+        device_id,
     )
     return rank
 
@@ -104,9 +106,11 @@ def wrap_model_fsdp(
     """
     from torch.distributed.fsdp import (
         CPUOffload,
-        FullyShardedDataParallel as FSDP,
         MixedPrecision,
         ShardingStrategy,
+    )
+    from torch.distributed.fsdp import (
+        FullyShardedDataParallel as FSDP,
     )
     from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 
@@ -151,7 +155,9 @@ def wrap_model_fsdp(
 
     logger.info(
         "FSDP wrapped: strategy=%s, mp=%s, device=%s",
-        sharding_strategy, mixed_precision_dtype, device_id,
+        sharding_strategy,
+        mixed_precision_dtype,
+        device_id,
     )
     return wrapped
 
@@ -164,9 +170,12 @@ def _find_transformer_layer_class(model: torch.nn.Module) -> type | None:
     """
     # Common layer class names from HuggingFace transformers.
     known_names = {
-        "Qwen2DecoderLayer", "Qwen3DecoderLayer",
-        "LlamaDecoderLayer", "MistralDecoderLayer",
-        "Phi3DecoderLayer", "GemmaDecoderLayer",
+        "Qwen2DecoderLayer",
+        "Qwen3DecoderLayer",
+        "LlamaDecoderLayer",
+        "MistralDecoderLayer",
+        "Phi3DecoderLayer",
+        "GemmaDecoderLayer",
     }
     for module in model.modules():
         cls_name = type(module).__name__
@@ -195,8 +204,10 @@ def get_full_state_dict(
     """
     from torch.distributed.fsdp import (
         FullStateDictConfig,
-        FullyShardedDataParallel as FSDP,
         StateDictType,
+    )
+    from torch.distributed.fsdp import (
+        FullyShardedDataParallel as FSDP,
     )
 
     cfg = FullStateDictConfig(
@@ -211,8 +222,13 @@ def get_full_state_dict(
 
 # Tensor fields in RolloutBatch that need broadcasting.
 _BATCH_TENSOR_FIELDS = [
-    "token_ids", "prompt_mask", "response_mask", "attention_mask",
-    "rewards", "old_log_probs", "ref_log_probs",
+    "token_ids",
+    "prompt_mask",
+    "response_mask",
+    "attention_mask",
+    "rewards",
+    "old_log_probs",
+    "ref_log_probs",
 ]
 _BATCH_OPTIONAL_TENSOR_FIELDS = ["token_rewards", "group_ids"]
 

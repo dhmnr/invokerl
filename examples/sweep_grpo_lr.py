@@ -10,13 +10,11 @@ For parallel sweeps (multiple machines / GPUs): launch this script
 per configuration with different LRs via your preferred scheduler
 (slurm, ray, or a bash for-loop over machines).
 """
+
 from __future__ import annotations
 
-import itertools
 import logging
 import random
-import subprocess
-import sys
 
 import torch
 
@@ -28,7 +26,7 @@ TOTAL_STEPS = 100
 
 
 def run_one(lr: float) -> None:
-    print(f"\n{'='*70}\n  SWEEP: lr={lr:.0e}\n{'='*70}\n")
+    print(f"\n{'=' * 70}\n  SWEEP: lr={lr:.0e}\n{'=' * 70}\n")
 
     random.seed(42)
     torch.manual_seed(42)

@@ -6,6 +6,11 @@ from invokerl.algorithms.ppo import PPO
 from invokerl.algorithms.simpo import SimPO
 
 __all__ = [
-    "BaseAlgorithm", "RolloutBatch",
-    "GRPO", "DPO", "PPO", "SimPO", "DAPO",
+    "BaseAlgorithm",
+    "RolloutBatch",
+    "GRPO",
+    "DPO",
+    "PPO",
+    "SimPO",
+    "DAPO",
 ]

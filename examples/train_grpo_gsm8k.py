@@ -3,6 +3,7 @@
 Run:
     uv run python examples/train_grpo_gsm8k.py
 """
+
 from __future__ import annotations
 
 import logging
@@ -27,7 +28,7 @@ def main():
     # Generator goes up first — CUDA initialization must happen inside vLLM.
     generator = rl.VLLMGenerator(
         model_name_or_path=MODEL,
-        gpu_memory_utilization=0.3,   # leave room for policy + ref model
+        gpu_memory_utilization=0.3,  # leave room for policy + ref model
         max_model_len=2048,
         dtype="bfloat16",
     )

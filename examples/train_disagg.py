@@ -7,6 +7,7 @@ The async DisaggPipeline runs vLLM generation on a background thread on
 GPU 0 while the training step runs on GPU 1. Weights sync every
 `sync_every` optimizer steps (pipeline handles this asynchronously).
 """
+
 from __future__ import annotations
 
 import logging
@@ -30,7 +31,7 @@ def main():
     torch.cuda.set_device(0)
     generator = rl.VLLMGenerator(
         model_name_or_path=MODEL,
-        gpu_memory_utilization=0.5,    # more memory available without policy on this GPU
+        gpu_memory_utilization=0.5,  # more memory available without policy on this GPU
         max_model_len=2048,
         dtype="bfloat16",
     )
@@ -46,9 +47,14 @@ def main():
     trainer = rl.Trainer(
         config=rl.TrainerConfig(
             model_name_or_path=MODEL,
-            total_steps=200, lr=5e-6, warmup_steps=50,
-            batch_size=1, group_size=4, accumulation_steps=4,
-            max_new_tokens=512, temperature=0.9,
+            total_steps=200,
+            lr=5e-6,
+            warmup_steps=50,
+            batch_size=1,
+            group_size=4,
+            accumulation_steps=4,
+            max_new_tokens=512,
+            temperature=0.9,
             output_dir="./checkpoints/grpo_gsm8k_disagg",
         ),
         algorithm=rl.algorithms.GRPO(clip_eps=0.2, beta=0.04),
@@ -65,16 +71,18 @@ def main():
         config=rl.PipelineConfig(
             gen_device=GEN_DEVICE,
             train_device=TRAIN_DEVICE,
-            sync_every=1,       # sync weights every optimizer step
-            buffer_size=2,      # double-buffered rollouts
-            max_staleness=0,    # 0 = no staleness limit
+            sync_every=1,  # sync weights every optimizer step
+            buffer_size=2,  # double-buffered rollouts
+            max_staleness=0,  # 0 = no staleness limit
         ),
         generator=generator,
         ref_policy=ref_policy,
         reward_fn=rl.rewards.ExactMatch(),
         dataset=rl.datasets.GSM8K("train"),
         gen_config=rl.GenerationConfig(
-            max_new_tokens=512, temperature=0.9, top_k=50,
+            max_new_tokens=512,
+            temperature=0.9,
+            top_k=50,
         ),
         batch_size=1,
         group_size=4,
