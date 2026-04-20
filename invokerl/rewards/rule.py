@@ -48,7 +48,7 @@ def extract_answer(text: str) -> str | None:
     # If the model uses <think> tags, prefer content after </think>
     think_end = text.rfind("</think>")
     if think_end != -1:
-        after_think = text[think_end + len("</think>"):]
+        after_think = text[think_end + len("</think>") :]
         # Try structured patterns in post-thinking content first
         result = _extract_from_text(after_think)
         if result is not None:
@@ -93,7 +93,7 @@ def check_answer(prediction: str | None, ground_truth: str) -> bool:
     return prediction.strip() == ground_truth.strip()
 
 
-class ExactMatchReward(BaseReward):
+class ExactMatch(BaseReward):
     """Binary reward: 1.0 if extracted answer matches ground truth, 0.0 otherwise.
 
     Works with any dataset that provides ground_truth in PromptItem.
@@ -129,9 +129,7 @@ class ExactMatchReward(BaseReward):
         if ground_truth is None:
             ground_truth = self._ground_truths.get(prompt)
         if ground_truth is None:
-            raise ValueError(
-                f"No ground truth for prompt (first 80 chars): {prompt[:80]!r}"
-            )
+            raise ValueError(f"No ground truth for prompt (first 80 chars): {prompt[:80]!r}")
 
         predicted = extract_answer(completion)
         return 1.0 if check_answer(predicted, ground_truth) else 0.0

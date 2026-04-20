@@ -46,8 +46,13 @@ class PPO(BaseAlgorithm):
         **kwargs,
     ):
         super().__init__(
-            clip_eps=clip_eps, vf_coef=vf_coef, entropy_coef=entropy_coef,
-            gae_gamma=gae_gamma, gae_lambda=gae_lambda, beta=beta, **kwargs,
+            clip_eps=clip_eps,
+            vf_coef=vf_coef,
+            entropy_coef=entropy_coef,
+            gae_gamma=gae_gamma,
+            gae_lambda=gae_lambda,
+            beta=beta,
+            **kwargs,
         )
         self.clip_eps = clip_eps
         self.vf_clip_eps = vf_clip_eps
@@ -143,7 +148,8 @@ class PPO(BaseAlgorithm):
             returns = advantages + old_values
             # Clipped value loss.
             vf_clipped = old_values + (values - old_values).clamp(
-                -self.vf_clip_eps, self.vf_clip_eps,
+                -self.vf_clip_eps,
+                self.vf_clip_eps,
             )
             vf_loss1 = (values - returns).pow(2)
             vf_loss2 = (vf_clipped - returns).pow(2)
@@ -167,15 +173,10 @@ class PPO(BaseAlgorithm):
                 "policy_loss": policy_loss_mean.item(),
                 "vf_loss": vf_loss_mean.item(),
                 "entropy": entropy.item(),
-                "clip_frac": (
-                    ((ratio - 1.0).abs() > self.clip_eps).float() * mask
-                ).sum().item() / num_tokens.item(),
-                "approx_kl": (
-                    (0.5 * log_ratio.pow(2)) * mask
-                ).sum().item() / num_tokens.item(),
-                "advantages_mean": advantages[mask.bool()].mean().item()
-                if mask.any()
-                else 0.0,
+                "clip_frac": (((ratio - 1.0).abs() > self.clip_eps).float() * mask).sum().item()
+                / num_tokens.item(),
+                "approx_kl": ((0.5 * log_ratio.pow(2)) * mask).sum().item() / num_tokens.item(),
+                "advantages_mean": advantages[mask.bool()].mean().item() if mask.any() else 0.0,
             }
             if self.beta > 0:
                 metrics["kl"] = (kl_per_token * mask).sum().item() / num_tokens.item()

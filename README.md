@@ -27,11 +27,11 @@ trainer = rl.Trainer(
         model_name_or_path=MODEL, total_steps=200, lr=5e-6,
         batch_size=1, group_size=4, accumulation_steps=4,
     ),
-    algorithm=rl.GRPO(clip_eps=0.2, beta=0.04),
+    algorithm=rl.algorithms.GRPO(clip_eps=0.2, beta=0.04),
     generator=generator, policy=policy, ref_policy=ref_policy,
-    reward_fn=rl.ExactMatch(),
-    dataset=rl.GSM8K("train"),
-    eval_dataset=rl.GSM8K("test"),
+    reward_fn=rl.rewards.ExactMatch(),
+    dataset=rl.datasets.GSM8K("train"),
+    eval_dataset=rl.datasets.GSM8K("test"),
 )
 trainer.train()
 ```
@@ -117,7 +117,7 @@ The data contract between the trainer and your algorithm:
 
 ```
 invokerl/
-├── __init__.py       # public API (rl.Trainer, rl.Policy, rl.GRPO, ...)
+├── __init__.py       # public API (rl.Trainer, rl.Policy, rl.algorithms.GRPO, ...)
 ├── trainer.py        # Trainer: train() dispatches to internal standard/disagg/FSDP paths
 ├── policy.py         # PolicyModel + .fsdp() for distributed
 ├── generator.py      # VLLMGenerator

@@ -64,14 +64,14 @@ class DPO(BaseAlgorithm):
 
         # Per-sequence sum of log-probs (only response tokens).
         policy_lp_sum = (new_log_probs * mask).sum(dim=1)  # [B]
-        ref_lp_sum = (ref_lp * mask).sum(dim=1)            # [B]
+        ref_lp_sum = (ref_lp * mask).sum(dim=1)  # [B]
 
         # Log-ratio: log π(y|x) - log π_ref(y|x)
         log_ratio = policy_lp_sum - ref_lp_sum  # [B]
 
         # Split into chosen / rejected pairs.
         if self.chosen_first:
-            chosen_lr = log_ratio[0::2]   # even indices
+            chosen_lr = log_ratio[0::2]  # even indices
             rejected_lr = log_ratio[1::2]  # odd indices
         else:
             chosen_lr = log_ratio[1::2]

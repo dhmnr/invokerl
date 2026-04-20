@@ -134,15 +134,10 @@ class GRPO(BaseAlgorithm):
                 "reward": batch.rewards.mean().item(),
                 "kl": (kl_per_token * mask).sum().item() / num_tokens.item(),
                 "policy_loss": (policy_loss * mask).sum().item() / num_tokens.item(),
-                "clip_frac": (
-                    ((ratio - 1.0).abs() > self.clip_eps).float() * mask
-                ).sum().item() / num_tokens.item(),
-                "approx_kl": (
-                    (0.5 * log_ratio.pow(2)) * mask
-                ).sum().item() / num_tokens.item(),
-                "advantages_mean": advantages[mask.bool()].mean().item()
-                if mask.any()
-                else 0.0,
+                "clip_frac": (((ratio - 1.0).abs() > self.clip_eps).float() * mask).sum().item()
+                / num_tokens.item(),
+                "approx_kl": ((0.5 * log_ratio.pow(2)) * mask).sum().item() / num_tokens.item(),
+                "advantages_mean": advantages[mask.bool()].mean().item() if mask.any() else 0.0,
             }
 
         return loss, metrics

@@ -40,8 +40,11 @@ class DAPO(BaseAlgorithm):
         **kwargs,
     ):
         super().__init__(
-            clip_eps_low=clip_eps_low, clip_eps_high=clip_eps_high,
-            beta=beta, overlong_penalty=overlong_penalty, **kwargs,
+            clip_eps_low=clip_eps_low,
+            clip_eps_high=clip_eps_high,
+            beta=beta,
+            overlong_penalty=overlong_penalty,
+            **kwargs,
         )
         self.clip_eps_low = clip_eps_low
         self.clip_eps_high = clip_eps_high
@@ -78,7 +81,9 @@ class DAPO(BaseAlgorithm):
         # Apply overlong penalty to truncated sequences.
         if self.overlong_penalty != 0.0 and batch.extras.get("truncated") is not None:
             truncated = batch.extras["truncated"]  # [B] bool
-            adv = torch.where(truncated, torch.tensor(self.overlong_penalty, device=adv.device), adv)
+            adv = torch.where(
+                truncated, torch.tensor(self.overlong_penalty, device=adv.device), adv
+            )
 
         return adv.unsqueeze(1).expand_as(mask) * mask
 
@@ -105,10 +110,13 @@ class DAPO(BaseAlgorithm):
 
         surr1 = ratio * advantages
         # Clip-higher: tighter lower bound, wider upper bound.
-        surr2 = ratio.clamp(
-            1.0 - self.clip_eps_low,
-            1.0 + self.clip_eps_high,
-        ) * advantages
+        surr2 = (
+            ratio.clamp(
+                1.0 - self.clip_eps_low,
+                1.0 + self.clip_eps_high,
+            )
+            * advantages
+        )
         policy_loss = -torch.min(surr1, surr2)
 
         # -- KL penalty (Schulman estimator) --
@@ -131,17 +139,12 @@ class DAPO(BaseAlgorithm):
                 "reward": batch.rewards.mean().item(),
                 "kl": (kl_per_token * mask).sum().item() / num_tokens.item(),
                 "policy_loss": (policy_loss * mask).sum().item() / num_tokens.item(),
-                "clip_frac": (
-                    ((ratio - 1.0).abs() > self.clip_eps_low).float() * mask
-                ).sum().item() / num_tokens.item(),
-                "approx_kl": (
-                    (0.5 * log_ratio.pow(2)) * mask
-                ).sum().item() / num_tokens.item(),
+                "clip_frac": (((ratio - 1.0).abs() > self.clip_eps_low).float() * mask).sum().item()
+                / num_tokens.item(),
+                "approx_kl": ((0.5 * log_ratio.pow(2)) * mask).sum().item() / num_tokens.item(),
                 "zero_var_groups": zero_var_groups,
                 "filtered_frac": zero_var_groups / max(1, num_groups),
-                "advantages_mean": advantages[mask.bool()].mean().item()
-                if mask.any()
-                else 0.0,
+                "advantages_mean": advantages[mask.bool()].mean().item() if mask.any() else 0.0,
             }
 
         return loss, metrics

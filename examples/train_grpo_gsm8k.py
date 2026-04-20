@@ -3,6 +3,7 @@
 Run:
     uv run python examples/train_grpo_gsm8k.py
 """
+
 from __future__ import annotations
 
 import logging
@@ -27,7 +28,7 @@ def main():
     # Generator goes up first — CUDA initialization must happen inside vLLM.
     generator = rl.VLLMGenerator(
         model_name_or_path=MODEL,
-        gpu_memory_utilization=0.3,   # leave room for policy + ref model
+        gpu_memory_utilization=0.3,  # leave room for policy + ref model
         max_model_len=2048,
         dtype="bfloat16",
     )
@@ -60,13 +61,13 @@ def main():
             save_every=500,
             output_dir="./checkpoints/grpo_gsm8k",
         ),
-        algorithm=rl.GRPO(clip_eps=0.2, beta=0.04),
+        algorithm=rl.algorithms.GRPO(clip_eps=0.2, beta=0.04),
         generator=generator,
         policy=policy,
         ref_policy=ref_policy,
-        reward_fn=rl.ExactMatch(),
-        dataset=rl.GSM8K("train"),
-        eval_dataset=rl.GSM8K("test"),
+        reward_fn=rl.rewards.ExactMatch(),
+        dataset=rl.datasets.GSM8K("train"),
+        eval_dataset=rl.datasets.GSM8K("test"),
     )
 
     trainer.train()

@@ -10,6 +10,7 @@ Produces:
 Also compatible with nsys: the same NVTX markers are emitted automatically.
     nsys profile --trace=cuda,nvtx python examples/profile_step.py
 """
+
 from __future__ import annotations
 
 import logging
@@ -47,15 +48,15 @@ def main():
             group_size=4,
             accumulation_steps=4,
             max_new_tokens=512,
-            eval_every=0,      # skip eval during profiling
-            save_every=0,      # skip checkpoints
+            eval_every=0,  # skip eval during profiling
+            save_every=0,  # skip checkpoints
         ),
-        algorithm=rl.GRPO(clip_eps=0.2, beta=0.04),
+        algorithm=rl.algorithms.GRPO(clip_eps=0.2, beta=0.04),
         generator=generator,
         policy=policy,
-        ref_policy=None,       # saves memory for this profiling run
-        reward_fn=rl.ExactMatch(),
-        dataset=rl.GSM8K("train"),
+        ref_policy=None,  # saves memory for this profiling run
+        reward_fn=rl.rewards.ExactMatch(),
+        dataset=rl.datasets.GSM8K("train"),
     )
 
     # Warmup step (not profiled — amortizes CUDA init, JIT, allocator caches)

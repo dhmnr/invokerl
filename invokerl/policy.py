@@ -44,9 +44,7 @@ class PolicyModel:
         self.model.train()
         self.model.gradient_checkpointing_enable()
 
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_name_or_path, trust_remote_code=True
-        )
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True)
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
@@ -91,12 +89,14 @@ class PolicyModel:
                 # get unsharded (allgathered) correctly. Directly accessing
                 # self.model.model bypasses FSDP and hits sharded 1-D weights.
                 outputs = self.model(
-                    input_ids=token_ids, attention_mask=attention_mask,
+                    input_ids=token_ids,
+                    attention_mask=attention_mask,
                 )
                 logits = outputs.logits[:, :-1, :]  # [B, T-1, V]
                 V = logits.size(-1)
                 log_probs = -F.cross_entropy(
-                    logits.reshape(-1, V), targets.reshape(-1),
+                    logits.reshape(-1, V),
+                    targets.reshape(-1),
                     reduction="none",
                 ).reshape(targets.shape)
                 del logits, outputs
@@ -104,17 +104,18 @@ class PolicyModel:
                 # Non-FSDP: chunked lm_head+CE to avoid materializing full
                 # [B, T, V] logits (~10GB at B×G=56, 512tok).
                 hidden_states = self.model.model(
-                    input_ids=token_ids, attention_mask=attention_mask,
+                    input_ids=token_ids,
+                    attention_mask=attention_mask,
                 ).last_hidden_state[:, :-1, :]  # [B, T-1, H]
 
                 log_probs = self._chunked_lm_head_ce(
-                    hidden_states, targets, ce_chunk_size,
+                    hidden_states,
+                    targets,
+                    ce_chunk_size,
                 )
 
         # Pad position 0 with zeros
-        pad = torch.zeros(
-            token_ids.shape[0], 1, device=log_probs.device, dtype=log_probs.dtype
-        )
+        pad = torch.zeros(token_ids.shape[0], 1, device=log_probs.device, dtype=log_probs.dtype)
         return torch.cat([pad, log_probs], dim=1)
 
     def _chunked_lm_head_ce(
@@ -142,7 +143,7 @@ class PolicyModel:
         V = lm_head.out_features
 
         # Small enough to do in one shot — skip chunking overhead.
-        if B * T * V * 4 < 2 * (1024 ** 3):  # < 2 GB
+        if B * T * V * 4 < 2 * (1024**3):  # < 2 GB
             logits = lm_head(hidden_states)
             return -F.cross_entropy(
                 logits.reshape(-1, V),
@@ -195,13 +196,14 @@ class PolicyModel:
         """Get model state dict. FSDP-aware: gathers full state on rank 0."""
         if self._fsdp_wrapped:
             from invokerl.distributed import get_full_state_dict
+
             return get_full_state_dict(self.model)
         return self.model.state_dict()
 
     def parameters(self):
         return self.model.parameters()
 
-    def freeze(self) -> "PolicyModel":
+    def freeze(self) -> PolicyModel:
         """Put the model in eval mode and disable gradients on all params.
 
         Use this for reference policies:
@@ -221,7 +223,7 @@ class PolicyModel:
         sharding: str = "FULL_SHARD",
         cpu_offload: bool = False,
         device_id: int | None = None,
-    ) -> "PolicyModel":
+    ) -> PolicyModel:
         """Wrap the model in FSDP, auto-initializing torch.distributed.
 
         Library-friendly alternative to `wrap_fsdp()`. Call this on the policy
@@ -300,7 +302,8 @@ class PolicyModel:
             if vllm_device != policy_device:
                 logger.info(
                     "Cross-device: weight sharing disabled (vllm=%s, policy=%s)",
-                    vllm_device, policy_device,
+                    vllm_device,
+                    policy_device,
                 )
                 return 0
 
@@ -345,8 +348,11 @@ class PolicyModel:
             q_dim = policy_params[q_name].shape[0]
             k_dim = policy_params[k_name].shape[0]
 
-            offsets = {"q_proj": (0, q_dim), "k_proj": (q_dim, q_dim + k_dim),
-                       "v_proj": (q_dim + k_dim, q_dim + k_dim + param.shape[0])}
+            offsets = {
+                "q_proj": (0, q_dim),
+                "k_proj": (q_dim, q_dim + k_dim),
+                "v_proj": (q_dim + k_dim, q_dim + k_dim + param.shape[0]),
+            }
             start, end = offsets[proj]
             return vllm_params[fused].data[start:end]
 
@@ -359,8 +365,7 @@ class PolicyModel:
                 continue
 
             gate_dim = policy_params[name.replace(f".{proj}.", ".gate_proj.")].shape[0]
-            offsets = {"gate_proj": (0, gate_dim),
-                       "up_proj": (gate_dim, gate_dim + param.shape[0])}
+            offsets = {"gate_proj": (0, gate_dim), "up_proj": (gate_dim, gate_dim + param.shape[0])}
             start, end = offsets[proj]
             return vllm_params[fused].data[start:end]
 

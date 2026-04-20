@@ -1,0 +1,66 @@
+name: Publish to PyPI
+
+# Runs on GitHub release (tag v*) or manual dispatch.
+#
+# Uses PyPI trusted publishing (OIDC, no API tokens). To enable:
+#   1. Create the project on https://pypi.org/manage/projects/ (or configure
+#      a "pending" publisher the first time).
+#   2. Go to https://pypi.org/manage/account/publishing/ and add a
+#      GitHub-Actions publisher with:
+#          Owner:       dhmnr
+#          Repository:  invokerl
+#          Workflow:    publish.yml
+#          Environment: pypi
+#   3. Create a GitHub Environment named `pypi` (Settings → Environments).
+#   4. Push a semver tag (e.g. `git tag v0.1.0 && git push --tags`) or
+#      cut a GitHub release.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build distributions
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Build wheel + sdist
+        run: uv build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/p/invokerl
+    permissions:
+      id-token: write  # required for OIDC trusted publishing
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # No username/password — trusted publisher uses the OIDC token
+          # from the `id-token: write` permission above.
+          print-hash: true

@@ -25,10 +25,10 @@ import time
 
 import torch
 
-
 # --- optional NVTX ---------------------------------------------------------
 try:
     import nvtx as _nvtx
+
     _HAS_NVTX = True
 except ImportError:
     _HAS_NVTX = False
@@ -74,6 +74,7 @@ def annotate(name: str, color: str = "blue"):
 
 # --- Profile context manager -----------------------------------------------
 
+
 class Profile:
     """Result of a profiled block.
 
@@ -91,7 +92,7 @@ class Profile:
         self.unaccounted_us: float = 0.0
         self.phase_times_us: dict[str, float] = {}
 
-    def __enter__(self) -> "Profile":
+    def __enter__(self) -> Profile:
         self._prof = torch.profiler.profile(
             activities=[
                 torch.profiler.ProfilerActivity.CPU,
@@ -149,8 +150,10 @@ class Profile:
         # we take CPU-side wall time only (that's the phase's wall duration).
         phase_totals: dict[str, float] = {}
         for evt in self._prof.events():
-            if (getattr(evt, "is_user_annotation", False)
-                    and evt.device_type == torch.autograd.DeviceType.CPU):
+            if (
+                getattr(evt, "is_user_annotation", False)
+                and evt.device_type == torch.autograd.DeviceType.CPU
+            ):
                 dur = evt.time_range.end - evt.time_range.start
                 if dur > 0:
                     phase_totals[evt.name] = phase_totals.get(evt.name, 0.0) + dur
@@ -160,16 +163,21 @@ class Profile:
         """Print a wall/CPU/CUDA/unaccounted breakdown and per-phase times."""
         wall_us = self.wall_s * 1e6
         print(f"  Wall clock:     {self.wall_s:>8.3f}s")
-        print(f"  CPU self time:  {self.cpu_self_us / 1e6:>8.3f}s  "
-              f"({self.cpu_self_us / wall_us * 100:>5.1f}%)")
-        print(f"  CUDA busy:      {self.cuda_busy_us / 1e6:>8.3f}s  "
-              f"({self.cuda_busy_us / wall_us * 100:>5.1f}%)")
-        print(f"  Unaccounted:    {self.unaccounted_us / 1e6:>8.3f}s  "
-              f"({self.unaccounted_us / wall_us * 100:>5.1f}%)")
+        print(
+            f"  CPU self time:  {self.cpu_self_us / 1e6:>8.3f}s  "
+            f"({self.cpu_self_us / wall_us * 100:>5.1f}%)"
+        )
+        print(
+            f"  CUDA busy:      {self.cuda_busy_us / 1e6:>8.3f}s  "
+            f"({self.cuda_busy_us / wall_us * 100:>5.1f}%)"
+        )
+        print(
+            f"  Unaccounted:    {self.unaccounted_us / 1e6:>8.3f}s  "
+            f"({self.unaccounted_us / wall_us * 100:>5.1f}%)"
+        )
 
         if self.phase_times_us:
             print("\n  Per-phase:")
-            total = sum(self.phase_times_us.values())
             for name, t in sorted(self.phase_times_us.items(), key=lambda x: -x[1]):
                 pct = t / wall_us * 100 if wall_us > 0 else 0
                 print(f"    {name:<20s} {t / 1e6:>8.3f}s  ({pct:>5.1f}%)")

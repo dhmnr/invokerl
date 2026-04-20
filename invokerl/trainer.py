@@ -21,7 +21,7 @@ from torch import Tensor
 from torch.optim import AdamW
 
 from invokerl.algorithms.base import BaseAlgorithm, RolloutBatch
-from invokerl.data.base import BaseDataset, PromptItem
+from invokerl.datasets.base import BaseDataset, PromptItem
 from invokerl.generator import BaseGenerator, GenerationConfig
 from invokerl.policy import PolicyModel
 from invokerl.profiling import annotate
@@ -129,6 +129,7 @@ class _DistributedRollout:
 
     def next(self) -> RolloutBatch | None:
         from invokerl.distributed import broadcast_batch
+
         if self._rank == 0:
             batch = self._pipeline.get_batch()
             if batch is None:
@@ -188,7 +189,7 @@ class TrainerConfig:
     weight_decay: float = 0.01
     grad_clip: float = 1.0
     warmup_steps: int = 50
-    lr_schedule: str = "constant"       # "constant" or "cosine"
+    lr_schedule: str = "constant"  # "constant" or "cosine"
     lr_end: float = 0.0
     accumulation_steps: int = 4
 
@@ -247,10 +248,13 @@ class Trainer:
                 logger.warning("Shared weights setup failed: %s. Using copy sync.", e)
 
         self.optimizer = AdamW(
-            self.policy.parameters(), lr=config.lr, weight_decay=config.weight_decay,
+            self.policy.parameters(),
+            lr=config.lr,
+            weight_decay=config.weight_decay,
         )
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(
-            self.optimizer, self._make_lr_lambda(),
+            self.optimizer,
+            self._make_lr_lambda(),
         )
         self.gen_config = GenerationConfig(
             max_new_tokens=config.max_new_tokens,
@@ -295,13 +299,16 @@ class Trainer:
 
         with annotate("reward", color="yellow"):
             rewards = self.reward_fn.score_batch(
-                expanded_prompts, gen_out.texts, ground_truths=expanded_truths,
+                expanded_prompts,
+                gen_out.texts,
+                ground_truths=expanded_truths,
             ).to(gen_out.token_ids.device)
 
         with annotate("ref_forward", color="green"):
             if self.ref_policy is not None:
                 ref_log_probs = self.ref_policy.forward_no_grad(
-                    gen_out.token_ids, gen_out.attention_mask,
+                    gen_out.token_ids,
+                    gen_out.attention_mask,
                 )
             else:
                 ref_log_probs = gen_out.log_probs.clone()
@@ -361,7 +368,8 @@ class Trainer:
         """Clip gradients, step optimizer, sync weights. Returns grad norm."""
         with annotate("optimizer_step", color="cyan"):
             grad_norm = torch.nn.utils.clip_grad_norm_(
-                self.policy.parameters(), self.config.grad_clip,
+                self.policy.parameters(),
+                self.config.grad_clip,
             )
             self.optimizer.step()
             self.scheduler.step()
@@ -400,11 +408,14 @@ class Trainer:
 
         items = self.eval_dataset.items[:n]
         eval_config = GenerationConfig(
-            max_new_tokens=self.config.max_new_tokens, temperature=0.0, top_k=1,
+            max_new_tokens=self.config.max_new_tokens,
+            temperature=0.0,
+            top_k=1,
         )
         gen_out = self.generator.generate([i.prompt for i in items], eval_config)
         rewards = self.reward_fn.score_batch(
-            [i.prompt for i in items], gen_out.texts,
+            [i.prompt for i in items],
+            gen_out.texts,
             ground_truths=[i.ground_truth for i in items],
         )
         return {
@@ -439,6 +450,7 @@ class Trainer:
 
         # Only rank 0 (or non-distributed) writes to disk.
         from invokerl.distributed import is_main_rank
+
         if not is_main_rank():
             return ""
 
@@ -453,13 +465,16 @@ class Trainer:
 
         # Move optimizer state to CPU before torch.save.
         cpu_optim_state = self._optimizer_state_to_cpu(self.optimizer.state_dict())
-        torch.save({
-            "step": step,
-            "optimizer": cpu_optim_state,
-            "scheduler": self.scheduler.state_dict(),
-            "history": self.history,
-            "weight_version": self._weight_version,
-        }, os.path.join(ckpt_dir, "training_state.pt"))
+        torch.save(
+            {
+                "step": step,
+                "optimizer": cpu_optim_state,
+                "scheduler": self.scheduler.state_dict(),
+                "history": self.history,
+                "weight_version": self._weight_version,
+            },
+            os.path.join(ckpt_dir, "training_state.pt"),
+        )
         del cpu_optim_state
 
         logger.info("Checkpoint saved: %s", ckpt_dir)
@@ -472,8 +487,7 @@ class Trainer:
         cpu_state = {"state": {}, "param_groups": state_dict["param_groups"]}
         for param_id, param_state in state_dict["state"].items():
             cpu_state["state"][param_id] = {
-                k: v.cpu() if isinstance(v, Tensor) else v
-                for k, v in param_state.items()
+                k: v.cpu() if isinstance(v, Tensor) else v for k, v in param_state.items()
             }
         return cpu_state
 
@@ -493,9 +507,12 @@ class Trainer:
         self._weights_shared = False
 
         from transformers import AutoModelForCausalLM
+
         self.policy.model = AutoModelForCausalLM.from_pretrained(
-            ckpt_dir, dtype=self.policy.dtype,
-            device_map=self.policy.device, attn_implementation="sdpa",
+            ckpt_dir,
+            dtype=self.policy.dtype,
+            device_map=self.policy.device,
+            attn_implementation="sdpa",
         )
         self.policy.model.train()
 
@@ -513,7 +530,8 @@ class Trainer:
                 logger.warning("Could not re-share weights after resume: %s", e)
 
         self.optimizer = AdamW(
-            self.policy.parameters(), lr=self.config.lr,
+            self.policy.parameters(),
+            lr=self.config.lr,
             weight_decay=self.config.weight_decay,
         )
 
@@ -550,12 +568,15 @@ class Trainer:
             source = _SyncRollout(self)
             rank, world_size, is_main = 0, 1, True
         elif is_fsdp:
-            from invokerl.distributed import barrier, get_rank, get_world_size, is_main_rank
+            from invokerl.distributed import get_rank, get_world_size, is_main_rank
+
             rank, world_size = get_rank(), get_world_size()
             is_main = is_main_rank()
             # Only rank 0 owns the pipeline; other ranks pass through broadcast.
             source = _DistributedRollout(
-                pipeline if is_main else None, rank, self.policy.device,
+                pipeline if is_main else None,
+                rank,
+                self.policy.device,
             )
         else:
             source = _AsyncRollout(pipeline)
@@ -583,12 +604,16 @@ class Trainer:
         if is_main:
             eval_metrics = self.evaluate()
             if eval_metrics:
-                logger.info("Baseline: %d/%d = %.1f%%",
-                            eval_metrics["eval_correct"], eval_metrics["eval_total"],
-                            eval_metrics["eval_accuracy"] * 100)
+                logger.info(
+                    "Baseline: %d/%d = %.1f%%",
+                    eval_metrics["eval_correct"],
+                    eval_metrics["eval_total"],
+                    eval_metrics["eval_accuracy"] * 100,
+                )
 
         if is_fsdp:
             from invokerl.distributed import barrier as _barrier
+
             _barrier()
 
         # -- Start async pipeline (if any) ------------------------------------
@@ -605,14 +630,19 @@ class Trainer:
                 _barrier()
 
         mode_label = (
-            "single GPU" if pipeline is None
-            else f"disagg+FSDP (world={world_size})" if is_fsdp
+            "single GPU"
+            if pipeline is None
+            else f"disagg+FSDP (world={world_size})"
+            if is_fsdp
             else "disagg"
         )
         if is_main:
             logger.info(
                 "Starting training [%s]: %d steps, accum=%d, group_size=%d",
-                mode_label, cfg.total_steps, cfg.accumulation_steps, cfg.group_size,
+                mode_label,
+                cfg.total_steps,
+                cfg.accumulation_steps,
+                cfg.group_size,
             )
 
         # -- Main loop ---------------------------------------------------------
@@ -668,23 +698,31 @@ class Trainer:
                 # -- Logging / eval / checkpoint (rank 0 only) -----------------
                 if is_main:
                     step_metrics = {k: sum(v) / len(v) for k, v in accumulated_metrics.items()}
-                    avg_stale = (sum(staleness_values) / len(staleness_values)
-                                 if staleness_values else 0.0)
+                    avg_stale = (
+                        sum(staleness_values) / len(staleness_values) if staleness_values else 0.0
+                    )
                     max_stale = max(staleness_values) if staleness_values else 0
-                    step_metrics.update({
-                        "step": step,
-                        "grad_norm": float(grad_norm),
-                        "lr": self.scheduler.get_last_lr()[0],
-                        "time": dt,
-                        "staleness": avg_stale,
-                        "staleness_max": max_stale,
-                        "weight_version": source.weight_version,
-                    })
+                    step_metrics.update(
+                        {
+                            "step": step,
+                            "grad_norm": float(grad_norm),
+                            "lr": self.scheduler.get_last_lr()[0],
+                            "time": dt,
+                            "staleness": avg_stale,
+                            "staleness_max": max_stale,
+                            "weight_version": source.weight_version,
+                        }
+                    )
                     if pipeline is not None:
-                        step_metrics.update({
-                            "t_wait": t_wait, "t_train": t_train, "t_optim": t_optim,
-                            "sync_ms": sync_ms, "queue_size": source.queue_size,
-                        })
+                        step_metrics.update(
+                            {
+                                "t_wait": t_wait,
+                                "t_train": t_train,
+                                "t_optim": t_optim,
+                                "sync_ms": sync_ms,
+                                "queue_size": source.queue_size,
+                            }
+                        )
                     if is_fsdp:
                         step_metrics["world_size"] = world_size
 
@@ -695,13 +733,19 @@ class Trainer:
                         extra = (
                             f" [wait={t_wait:.1f}s train={t_train:.1f}s optim={t_optim:.1f}s]"
                             f" stale={avg_stale:.1f} sync={sync_ms:.0f}ms q={source.queue_size}"
-                            if pipeline is not None else ""
+                            if pipeline is not None
+                            else ""
                         )
                         logger.info(
                             "[step %4d] loss=%.4f reward=%.3f kl=%.4f gnorm=%.2f lr=%.2e time=%.1fs%s",
-                            step, step_metrics.get("loss", 0), step_metrics.get("reward", 0),
-                            step_metrics.get("kl", 0), float(grad_norm),
-                            step_metrics["lr"], dt, extra,
+                            step,
+                            step_metrics.get("loss", 0),
+                            step_metrics.get("reward", 0),
+                            step_metrics.get("kl", 0),
+                            float(grad_norm),
+                            step_metrics["lr"],
+                            dt,
+                            extra,
                         )
 
                     if cfg.eval_every > 0 and (step + 1) % cfg.eval_every == 0:
@@ -709,7 +753,8 @@ class Trainer:
                         if eval_metrics:
                             logger.info(
                                 "--- Eval step %d: %d/%d = %.1f%%",
-                                step + 1, eval_metrics["eval_correct"],
+                                step + 1,
+                                eval_metrics["eval_correct"],
                                 eval_metrics["eval_total"],
                                 eval_metrics["eval_accuracy"] * 100,
                             )
@@ -731,9 +776,12 @@ class Trainer:
         if is_main:
             final_eval = self.evaluate()
             if final_eval:
-                logger.info("Final: %d/%d = %.1f%%",
-                            final_eval["eval_correct"], final_eval["eval_total"],
-                            final_eval["eval_accuracy"] * 100)
+                logger.info(
+                    "Final: %d/%d = %.1f%%",
+                    final_eval["eval_correct"],
+                    final_eval["eval_total"],
+                    final_eval["eval_accuracy"] * 100,
+                )
 
         self.save_checkpoint(cfg.total_steps)
 

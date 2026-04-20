@@ -3,82 +3,96 @@
 Library-first. Compose a training run by passing objects to Trainer:
 
     import invokerl as rl
+    from invokerl.algorithms import GRPO
+    from invokerl.datasets import GSM8K
+    from invokerl.rewards import ExactMatch
 
     policy = rl.Policy("Qwen/Qwen3-0.6B")
     trainer = rl.Trainer(
         policy=policy,
-        ref_policy=rl.Policy("Qwen/Qwen3-0.6B", frozen=True),
+        ref_policy=rl.Policy("Qwen/Qwen3-0.6B").freeze(),
         generator=rl.VLLMGenerator("Qwen/Qwen3-0.6B"),
-        algorithm=rl.GRPO(clip_eps=0.2, beta=0.04),
-        dataset=rl.GSM8K("train"),
-        eval_dataset=rl.GSM8K("test"),
-        reward=rl.ExactMatch(),
+        algorithm=GRPO(clip_eps=0.2, beta=0.04),
+        dataset=GSM8K("train"),
+        eval_dataset=GSM8K("test"),
+        reward_fn=ExactMatch(),
         lr=5e-6, total_steps=200, batch_size=1, group_size=4, accumulation_steps=4,
     )
     trainer.train()
 
-Multi-GPU is seamless — just pass different objects:
+Multi-GPU is seamless — pass different objects:
 
     # Disaggregated (gen on GPU 0, train on GPU 1):
-    policy = rl.Policy("Qwen/...", device="cuda:1")
-    gen = rl.VLLMGenerator("Qwen/...", device="cuda:0")
-    pipeline = rl.DisaggPipeline(...)
-    trainer.train(pipeline=pipeline)
+    trainer.train(pipeline=rl.DisaggPipeline(...))
 
     # FSDP (with torchrun):
-    policy = rl.Policy("Qwen/...").fsdp()  # auto-init torch.distributed
-    trainer.train(pipeline=pipeline)       # FSDP auto-detected
+    policy = rl.Policy("Qwen/...").fsdp()   # auto-init torch.distributed
+    trainer.train(pipeline=...)             # FSDP auto-detected
 
 Profiling is opt-in:
 
     with rl.profile() as p:
-        trainer.step()      # or trainer.train() for a full run
+        trainer.step()
     p.summary()
     p.export_trace("trace.json")   # open at ui.perfetto.dev
+
+## Namespace layout
+
+    rl.Trainer, rl.Policy, rl.VLLMGenerator,
+    rl.DisaggPipeline, rl.profile     — framework core (always needed)
+
+    rl.BaseAlgorithm, rl.BaseDataset,
+    rl.BaseReward, rl.RolloutBatch,
+    rl.PromptItem                     — base contracts (for type hints / subclasses)
+
+    rl.algorithms.GRPO/DPO/PPO/SimPO/DAPO   — concrete algorithm implementations
+    rl.datasets.GSM8K                       — concrete datasets
+    rl.rewards.ExactMatch                   — concrete reward functions
 """
 
 from __future__ import annotations
 
-# Core
+# Framework core
 from invokerl.trainer import Trainer, TrainerConfig
 from invokerl.policy import PolicyModel as Policy
 from invokerl.generator import VLLMGenerator, GenerationConfig
 from invokerl.pipeline import DisaggPipeline, PipelineConfig
 
-# Algorithms
+# Base contracts — exposed at top level for type hints and subclassing
 from invokerl.algorithms.base import BaseAlgorithm, RolloutBatch
-from invokerl.algorithms.grpo import GRPO
-from invokerl.algorithms.dpo import DPO
-from invokerl.algorithms.ppo import PPO
-from invokerl.algorithms.simpo import SimPO
-from invokerl.algorithms.dapo import DAPO
-
-# Data
-from invokerl.data.base import BaseDataset, PromptItem
-from invokerl.data.gsm8k import GSM8KDataset as GSM8K
-
-# Rewards
+from invokerl.datasets.base import BaseDataset, PromptItem
 from invokerl.rewards.base import BaseReward
-from invokerl.rewards.rule import ExactMatchReward as ExactMatch
 
-# Profiling
+# Profiling — small surface, cross-cutting
 from invokerl.profiling import profile, annotate, Profile
+
+# Concrete implementations live in submodules:
+#   from invokerl.algorithms import GRPO        (or rl.algorithms.GRPO)
+#   from invokerl.datasets import GSM8K
+#   from invokerl.rewards import ExactMatch
+from invokerl import algorithms, datasets, rewards
 
 __all__ = [
     # Core
-    "Trainer", "TrainerConfig",
+    "Trainer",
+    "TrainerConfig",
     "Policy",
-    "VLLMGenerator", "GenerationConfig",
-    "DisaggPipeline", "PipelineConfig",
-    # Algorithms
-    "BaseAlgorithm", "RolloutBatch",
-    "GRPO", "DPO", "PPO", "SimPO", "DAPO",
-    # Data
-    "BaseDataset", "PromptItem",
-    "GSM8K",
-    # Rewards
+    "VLLMGenerator",
+    "GenerationConfig",
+    "DisaggPipeline",
+    "PipelineConfig",
+    # Base contracts
+    "BaseAlgorithm",
+    "RolloutBatch",
+    "BaseDataset",
+    "PromptItem",
     "BaseReward",
-    "ExactMatch",
     # Profiling
-    "profile", "annotate", "Profile",
+    "profile",
+    "annotate",
+    "Profile",
+    # Submodules
+    "algorithms",
+    "datasets",
+    "rewards",
 ]

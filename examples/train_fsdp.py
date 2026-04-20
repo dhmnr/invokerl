@@ -6,6 +6,7 @@ Requires torchrun:
 With --nproc_per_node=2: rank 0 runs on cuda:1, rank 1 runs on cuda:2.
 vLLM generation stays on cuda:0 and is only driven by rank 0.
 """
+
 from __future__ import annotations
 
 import logging
@@ -35,10 +36,17 @@ def main():
     generator = None
     if local_rank == 0:
         _torchrun_keys = [
-            "MASTER_ADDR", "MASTER_PORT", "RANK", "WORLD_SIZE",
-            "LOCAL_RANK", "LOCAL_WORLD_SIZE", "GROUP_RANK",
-            "TORCHELASTIC_RUN_ID", "TORCHELASTIC_RESTART_COUNT",
-            "TORCHELASTIC_MAX_RESTARTS", "OMP_NUM_THREADS",
+            "MASTER_ADDR",
+            "MASTER_PORT",
+            "RANK",
+            "WORLD_SIZE",
+            "LOCAL_RANK",
+            "LOCAL_WORLD_SIZE",
+            "GROUP_RANK",
+            "TORCHELASTIC_RUN_ID",
+            "TORCHELASTIC_RESTART_COUNT",
+            "TORCHELASTIC_MAX_RESTARTS",
+            "OMP_NUM_THREADS",
         ]
         _saved = {k: os.environ.pop(k) for k in _torchrun_keys if k in os.environ}
 
@@ -64,18 +72,23 @@ def main():
     trainer = rl.Trainer(
         config=rl.TrainerConfig(
             model_name_or_path=MODEL,
-            total_steps=200, lr=5e-6, warmup_steps=50,
-            batch_size=1, group_size=4, accumulation_steps=4,
-            max_new_tokens=512, temperature=0.9,
+            total_steps=200,
+            lr=5e-6,
+            warmup_steps=50,
+            batch_size=1,
+            group_size=4,
+            accumulation_steps=4,
+            max_new_tokens=512,
+            temperature=0.9,
             output_dir="./checkpoints/grpo_gsm8k_fsdp",
         ),
-        algorithm=rl.GRPO(clip_eps=0.2, beta=0.04),
+        algorithm=rl.algorithms.GRPO(clip_eps=0.2, beta=0.04),
         generator=generator,
         policy=policy,
         ref_policy=ref_policy,
-        reward_fn=rl.ExactMatch(),
-        dataset=rl.GSM8K("train"),
-        eval_dataset=rl.GSM8K("test") if local_rank == 0 else None,
+        reward_fn=rl.rewards.ExactMatch(),
+        dataset=rl.datasets.GSM8K("train"),
+        eval_dataset=rl.datasets.GSM8K("test") if local_rank == 0 else None,
     )
 
     pipeline = None
@@ -84,12 +97,17 @@ def main():
             config=rl.PipelineConfig(
                 gen_device=GEN_DEVICE,
                 train_device=f"cuda:{train_device_id}",
-                sync_every=1, buffer_size=2, max_staleness=0,
+                sync_every=1,
+                buffer_size=2,
+                max_staleness=0,
             ),
-            generator=generator, ref_policy=ref_policy,
-            reward_fn=rl.ExactMatch(), dataset=rl.GSM8K("train"),
+            generator=generator,
+            ref_policy=ref_policy,
+            reward_fn=rl.rewards.ExactMatch(),
+            dataset=rl.datasets.GSM8K("train"),
             gen_config=rl.GenerationConfig(max_new_tokens=512, temperature=0.9, top_k=50),
-            batch_size=1, group_size=4,
+            batch_size=1,
+            group_size=4,
         )
 
     # Trainer.train() auto-detects FSDP from the policy and picks the
