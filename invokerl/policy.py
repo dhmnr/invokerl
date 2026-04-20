@@ -194,7 +194,7 @@ class PolicyModel:
     def get_state_dict(self) -> dict[str, Tensor]:
         """Get model state dict. FSDP-aware: gathers full state on rank 0."""
         if self._fsdp_wrapped:
-            from invokerl.engine.distributed import get_full_state_dict
+            from invokerl.distributed import get_full_state_dict
             return get_full_state_dict(self.model)
         return self.model.state_dict()
 
@@ -203,8 +203,49 @@ class PolicyModel:
 
     # -- FSDP support ----------------------------------------------------------
 
+    def fsdp(
+        self,
+        sharding: str = "FULL_SHARD",
+        cpu_offload: bool = False,
+        device_id: int | None = None,
+    ) -> "PolicyModel":
+        """Wrap the model in FSDP, auto-initializing torch.distributed.
+
+        Library-friendly alternative to `wrap_fsdp()`. Call this on the policy
+        BEFORE constructing the Trainer (optimizer must see FSDP params).
+
+        If `device_id` is None, uses the LOCAL_RANK env var set by torchrun.
+        Assumes the process was launched via torchrun (or equivalent) — reads
+        RANK / WORLD_SIZE / LOCAL_RANK from the environment.
+
+        Returns self for chaining:
+            policy = rl.Policy("Qwen/...").fsdp()
+
+        Args:
+            sharding: "FULL_SHARD" | "SHARD_GRAD_OP" | "NO_SHARD"
+            cpu_offload: Offload params to CPU when not in use
+            device_id: CUDA device for this rank (default: LOCAL_RANK)
+        """
+        import os as _os
+
+        from invokerl.distributed import init_distributed
+
+        if device_id is None:
+            device_id = int(_os.environ.get("LOCAL_RANK", "0"))
+
+        init_distributed(device_id=device_id)
+        self.wrap_fsdp(
+            device_id=device_id,
+            sharding_strategy=sharding,
+            cpu_offload=cpu_offload,
+        )
+        return self
+
     def wrap_fsdp(self, device_id: int | torch.device, **kwargs) -> None:
         """Wrap the model in FSDP for distributed training.
+
+        Low-level: callers must have already called init_distributed().
+        For the ergonomic path, use `fsdp()` instead.
 
         Must be called BEFORE creating the optimizer. After wrapping,
         get_state_dict() returns the full (unsharded) state dict on rank 0
@@ -214,7 +255,7 @@ class PolicyModel:
             device_id: CUDA device for this rank.
             **kwargs: Extra args passed to wrap_model_fsdp().
         """
-        from invokerl.engine.distributed import wrap_model_fsdp
+        from invokerl.distributed import wrap_model_fsdp
 
         self.model = wrap_model_fsdp(
             self.model,
