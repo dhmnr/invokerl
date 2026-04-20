@@ -382,10 +382,37 @@ class Trainer:
             return state["step"]
         return 0
 
-    # -- Main loop -------------------------------------------------------------
+    # -- Public entry point ----------------------------------------------------
 
-    def train(self, resume_from: str | None = None) -> list[dict]:
-        """Run the full training loop."""
+    def train(
+        self,
+        resume_from: str | None = None,
+        pipeline=None,
+    ) -> list[dict]:
+        """Run the full training loop.
+
+        Seamless across modes: dispatches based on what you pass in.
+
+            trainer.train()                       # single-GPU / standard
+            trainer.train(pipeline=disagg_pipe)   # async disagg (or disagg + FSDP)
+
+        Args:
+            resume_from: Optional checkpoint directory to resume from.
+            pipeline: Optional DisaggPipeline for async generation. When given,
+                the Trainer consumes pre-generated batches instead of running
+                its own rollout loop. FSDP is auto-detected from the policy.
+        """
+        if pipeline is None:
+            return self._train_standard(resume_from)
+        # Disagg mode: FSDP vs. non-FSDP is inferred from the policy.
+        if getattr(self.policy, "_fsdp_wrapped", False):
+            return self._train_disagg_distributed(pipeline, resume_from)
+        return self._train_disagg(pipeline, resume_from)
+
+    # -- Standard (single-GPU) loop --------------------------------------------
+
+    def _train_standard(self, resume_from: str | None = None) -> list[dict]:
+        """Synchronous single-GPU training loop."""
         cfg = self.config
         start_step = 0
 
@@ -477,7 +504,7 @@ class Trainer:
 
     # -- Disaggregated training loop -------------------------------------------
 
-    def train_disagg(
+    def _train_disagg(
         self,
         pipeline,  # DisaggPipeline — imported lazily to avoid circular deps
         resume_from: str | None = None,
@@ -630,7 +657,7 @@ class Trainer:
 
     # -- Distributed disaggregated training (FSDP) -----------------------------
 
-    def train_disagg_distributed(
+    def _train_disagg_distributed(
         self,
         pipeline,  # DisaggPipeline — only on rank 0, None on other ranks
         resume_from: str | None = None,
