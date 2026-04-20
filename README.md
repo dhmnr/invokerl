@@ -17,10 +17,7 @@ MODEL = "Qwen/Qwen3-0.6B"
 
 generator = rl.VLLMGenerator(MODEL, gpu_memory_utilization=0.3, max_model_len=2048)
 policy = rl.Policy(MODEL)
-ref_policy = rl.Policy(MODEL)  # frozen ref for KL
-ref_policy.model.eval()
-for p in ref_policy.model.parameters():
-    p.requires_grad = False
+ref_policy = rl.Policy(MODEL).freeze()  # frozen ref for KL
 
 trainer = rl.Trainer(
     config=rl.TrainerConfig(
