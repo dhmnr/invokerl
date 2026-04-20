@@ -1,20 +1,15 @@
 # invokerl
 
-Hackable RL post-training for LLMs. Production-grade generation (vLLM), research-grade algorithms (PyTorch), library-first API.
-
-## Why
-
-RL post-training research is bottlenecked by infrastructure, not ideas. Most of your time is spent fighting OOM errors, debugging weight sync, and waiting for generation — not experimenting with credit assignment or loss functions.
-
-invokerl is a **library**, not a framework. You write a Python script that composes objects (`Trainer`, `Policy`, `VLLMGenerator`, an algorithm, a dataset, a reward). No YAML, no CLI, no config monster. To extend — clone the repo and edit.
+Hackable and performant RL post-training for LLMs. 
 
 ## Install
 
 ```bash
-uv sync
+pip install invokerl
 ```
 
-## Quick start — single GPU
+## Quick start
+### single GPU
 
 ```python
 import invokerl as rl
@@ -44,7 +39,7 @@ trainer.train()
 
 Full runnable: [examples/train_grpo_gsm8k.py](examples/train_grpo_gsm8k.py)
 
-## Multi-GPU is seamless
+## Multi-GPU 
 
 Same `trainer.train()` — pass different objects:
 
@@ -102,8 +97,7 @@ Pass it to `Trainer`:
 ```python
 trainer = rl.Trainer(..., algorithm=MyAlgorithm(...))
 ```
-
-No registry, no configuration, no plugin system. It's just a class. Five algorithms already exist as reference: [`GRPO`](invokerl/algorithms/grpo.py), [`DPO`](invokerl/algorithms/dpo.py), [`PPO`](invokerl/algorithms/ppo.py), [`SimPO`](invokerl/algorithms/simpo.py), [`DAPO`](invokerl/algorithms/dapo.py).
+Five algorithms already exist as reference: [`GRPO`](invokerl/algorithms/grpo.py), [`DPO`](invokerl/algorithms/dpo.py), [`PPO`](invokerl/algorithms/ppo.py), [`SimPO`](invokerl/algorithms/simpo.py), [`DAPO`](invokerl/algorithms/dapo.py).
 
 ## RolloutBatch
 
@@ -142,15 +136,6 @@ examples/
 ├── profile_step.py         # profiling
 └── sweep_grpo_lr.py        # hyperparameter sweep
 ```
-
-## Design principles
-
-- **Library, not framework.** You write Python. To extend, you edit the library.
-- **Composition over configuration.** `trainer.train()` is the only entry point. Mode (single-GPU vs disagg vs FSDP) comes from what you pass in, not from flags.
-- **Credit assignment is a first-class hook.** `compute_advantages()` is separate from `compute_loss()` so group-norm, GAE, PRM experiments touch 10 lines.
-- **Profiling is a context manager.** Opt-in, one line. NVTX markers are always emitted (free when no one's watching).
-- **vLLM in-process.** No HTTP, direct GPU→GPU weight sync. Shared-weights mode makes updates zero-copy.
-- **Clone-to-hack.** Don't layer abstractions to accommodate extensions; fork the repo and change the code. That's how the reference algorithms are written.
 
 ## License
 
