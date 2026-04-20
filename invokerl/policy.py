@@ -194,7 +194,7 @@ class PolicyModel:
     def get_state_dict(self) -> dict[str, Tensor]:
         """Get model state dict. FSDP-aware: gathers full state on rank 0."""
         if self._fsdp_wrapped:
-            from invokerl.engine.distributed import get_full_state_dict
+            from invokerl.distributed import get_full_state_dict
             return get_full_state_dict(self.model)
         return self.model.state_dict()
 
@@ -214,7 +214,7 @@ class PolicyModel:
             device_id: CUDA device for this rank.
             **kwargs: Extra args passed to wrap_model_fsdp().
         """
-        from invokerl.engine.distributed import wrap_model_fsdp
+        from invokerl.distributed import wrap_model_fsdp
 
         self.model = wrap_model_fsdp(
             self.model,

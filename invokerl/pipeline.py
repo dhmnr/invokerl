@@ -30,8 +30,8 @@ from torch import Tensor
 
 from invokerl.algorithms.base import RolloutBatch
 from invokerl.data.base import BaseDataset
-from invokerl.engine.generator import BaseGenerator, GenerationConfig
-from invokerl.engine.policy import PolicyModel
+from invokerl.generator import BaseGenerator, GenerationConfig
+from invokerl.policy import PolicyModel
 from invokerl.rewards.base import BaseReward
 
 logger = logging.getLogger(__name__)

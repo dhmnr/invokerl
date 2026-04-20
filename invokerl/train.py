@@ -17,7 +17,7 @@ import sys
 import torch
 import yaml
 
-from invokerl.engine.trainer import Trainer, TrainerConfig
+from invokerl.trainer import Trainer, TrainerConfig
 
 logger = logging.getLogger("invokerl")
 
@@ -125,7 +125,7 @@ def build_reward(cfg: dict):
 
 def build_generator(cfg: dict, trainer_config: TrainerConfig, tensor_parallel_size: int = 1):
     """Instantiate vLLM generation engine."""
-    from invokerl.engine.generator import VLLMGenerator
+    from invokerl.generator import VLLMGenerator
 
     model_cfg = cfg["model"]
     gen_cfg = cfg.get("generation", {})
@@ -146,7 +146,7 @@ def build_policy(cfg: dict, device: str = "cuda", frozen: bool = False):
         frozen: If True, returns an eval-mode model with no gradients
                 (used as the reference policy).
     """
-    from invokerl.engine.policy import PolicyModel
+    from invokerl.policy import PolicyModel
 
     model_cfg = cfg["model"]
     dtype = DTYPE_MAP.get(model_cfg.get("dtype", "bfloat16"), torch.bfloat16)
@@ -316,7 +316,7 @@ def main() -> None:
     fsdp_rank = 0
     fsdp_world = 1
     if args.fsdp:
-        from invokerl.engine.distributed import init_distributed
+        from invokerl.distributed import init_distributed
         # Bind each rank to its train GPU (not LOCAL_RANK which may overlap
         # with the gen GPU). E.g., with --train-device-start 1 and 2 ranks:
         #   rank 0 → cuda:1, rank 1 → cuda:2  (cuda:0 is gen)
@@ -393,8 +393,8 @@ def main() -> None:
         return
 
     if args.disagg:
-        from invokerl.engine.generator import GenerationConfig
-        from invokerl.engine.pipeline import DisaggPipeline, PipelineConfig
+        from invokerl.generator import GenerationConfig
+        from invokerl.pipeline import DisaggPipeline, PipelineConfig
 
         # Only rank 0 creates the pipeline. Other ranks pass None.
         if fsdp_rank == 0:

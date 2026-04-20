@@ -22,8 +22,8 @@ from torch.optim import AdamW
 
 from invokerl.algorithms.base import BaseAlgorithm, RolloutBatch
 from invokerl.data.base import BaseDataset, PromptItem
-from invokerl.engine.generator import BaseGenerator, GenerationConfig
-from invokerl.engine.policy import PolicyModel
+from invokerl.generator import BaseGenerator, GenerationConfig
+from invokerl.policy import PolicyModel
 from invokerl.profiling import annotate
 from invokerl.rewards.base import BaseReward
 
@@ -293,7 +293,7 @@ class Trainer:
         state_dict = self.policy.get_state_dict()
 
         # Only rank 0 (or non-distributed) writes to disk.
-        from invokerl.engine.distributed import is_main_rank
+        from invokerl.distributed import is_main_rank
         if not is_main_rank():
             return ""
 
@@ -643,7 +643,7 @@ class Trainer:
 
         Launch via: torchrun --nproc_per_node=M -m invokerl.train --disagg --fsdp
         """
-        from invokerl.engine.distributed import (
+        from invokerl.distributed import (
             barrier,
             broadcast_batch,
             get_rank,
