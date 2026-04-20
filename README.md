@@ -2,8 +2,6 @@
 
 Hackable RL post-training for LLMs. Production-grade generation (vLLM), research-grade algorithms (PyTorch), library-first API.
 
-**46.5% → 62.5% on GSM8K** with Qwen3-0.6B in 2.5 hours on a single RTX 5090.
-
 ## Why
 
 RL post-training research is bottlenecked by infrastructure, not ideas. Most of your time is spent fighting OOM errors, debugging weight sync, and waiting for generation — not experimenting with credit assignment or loss functions.
@@ -121,23 +119,6 @@ The data contract between the trainer and your algorithm:
 | `ref_log_probs` | `[B, T]` | Log-probs from frozen reference model |
 | `group_ids` | `[B]` | Which prompt each completion belongs to |
 | `group_size` | `int` | Completions per prompt |
-
-## Performance
-
-Profiled on RTX 5090, Qwen3-0.6B:
-
-| Phase | Time | % Step |
-|-------|------|--------|
-| Generation (vLLM) | 5.7s | 70% |
-| Weight sync | 1.6s | 19.5% |
-| Backward | 0.4s | 5.1% |
-| Ref forward | 0.2s | 3.0% |
-| Policy forward | 0.2s | 2.1% |
-| Optimizer | 0.02s | 0.3% |
-
-Training phases (forward + backward) run at 79–94% of peak BF16 TFLOPS. Generation is the bottleneck — inherent to autoregressive decoding, mitigated by vLLM.
-
-**Total: 8.1s/step, 443 steps/hour.** 1000 GRPO steps in ~2.5 hours on a single GPU.
 
 ## Project structure
 
