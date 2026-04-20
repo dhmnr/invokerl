@@ -13,7 +13,6 @@ Also compatible with nsys: the same NVTX markers are emitted automatically.
 
 from __future__ import annotations
 
-import logging
 import random
 
 import torch
@@ -22,7 +21,7 @@ import invokerl as rl
 
 
 def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+    rl.setup_logging()
     random.seed(42)
     torch.manual_seed(42)
 

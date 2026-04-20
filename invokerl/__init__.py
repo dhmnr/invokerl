@@ -66,6 +66,9 @@ from invokerl.rewards.base import BaseReward
 # Profiling — small surface, cross-cutting
 from invokerl.profiling import profile, annotate, Profile
 
+# Logging — rich-formatted step panels + RichHandler for stdlib logger
+from invokerl._logging import setup_logging
+
 # Concrete implementations live in submodules:
 #   from invokerl.algorithms import GRPO        (or rl.algorithms.GRPO)
 #   from invokerl.datasets import GSM8K
@@ -91,6 +94,8 @@ __all__ = [
     "profile",
     "annotate",
     "Profile",
+    # Logging
+    "setup_logging",
     # Submodules
     "algorithms",
     "datasets",

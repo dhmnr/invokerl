@@ -13,7 +13,6 @@ per configuration with different LRs via your preferred scheduler
 
 from __future__ import annotations
 
-import logging
 import random
 
 import torch
@@ -72,7 +71,7 @@ def run_one(lr: float) -> None:
 
 
 def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+    rl.setup_logging()
 
     # NOTE: sequential loop in one process. vLLM doesn't reload weights
     # cleanly between runs in the same process — prefer launching each
