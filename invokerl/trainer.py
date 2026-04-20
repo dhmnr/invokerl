@@ -20,7 +20,7 @@ import torch
 from torch import Tensor
 from torch.optim import AdamW
 
-from invokerl._logging import log_step
+from invokerl._logging import log_step, training_progress
 from invokerl.algorithms.base import BaseAlgorithm, RolloutBatch
 from invokerl.datasets.base import BaseDataset, PromptItem
 from invokerl.generator import BaseGenerator, GenerationConfig
@@ -647,6 +647,18 @@ class Trainer:
             )
 
         # -- Main loop ---------------------------------------------------------
+        # Progress bar lives across the whole loop. Non-main ranks get a
+        # no-op so we don't fight with FSDP output and bar ordering.
+        from contextlib import ExitStack
+
+        _stack = ExitStack()
+        if is_main:
+            advance_progress = _stack.enter_context(
+                training_progress(cfg.total_steps, start_step)
+            )
+        else:
+            advance_progress = lambda *_, **__: None
+
         try:
             for step in range(start_step, cfg.total_steps):
                 t0 = time.time()
@@ -758,7 +770,10 @@ class Trainer:
                 if is_fsdp:
                     _barrier()
 
+                advance_progress()
+
         finally:
+            _stack.close()  # tears down the progress bar cleanly
             stats = source.stop()
             if stats and is_main:
                 logger.info("Pipeline stats: %s", stats)

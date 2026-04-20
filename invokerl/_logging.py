@@ -17,10 +17,20 @@ Console instance.
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.panel import Panel
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 from rich.table import Table
 from rich.text import Text
 
@@ -152,3 +162,37 @@ def log_step(
 def get_console() -> Console:
     """Expose the shared Console for callers that want to `.print` directly."""
     return _console
+
+
+@contextmanager
+def training_progress(total_steps: int, start_step: int = 0):
+    """Live progress bar for the training loop.
+
+    Usage inside Trainer.train():
+
+        with training_progress(cfg.total_steps, start_step) as advance:
+            for step in range(start_step, cfg.total_steps):
+                ...
+                advance()
+
+    Panels and log lines printed through the shared Console interleave
+    naturally above the bar.
+    """
+    with Progress(
+        SpinnerColumn(style="cyan"),
+        TextColumn("[bold]training[/]"),
+        BarColumn(bar_width=None),
+        MofNCompleteColumn(),
+        TextColumn("·"),
+        TimeElapsedColumn(),
+        TextColumn("· eta"),
+        TimeRemainingColumn(),
+        console=_console,
+        transient=False,
+    ) as progress:
+        task = progress.add_task("train", total=total_steps, completed=start_step)
+
+        def advance(n: int = 1) -> None:
+            progress.advance(task, n)
+
+        yield advance
