@@ -37,9 +37,8 @@ class PolicyModel:
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name_or_path,
             dtype=load_dtype,
-            device_map=device,
             attn_implementation="sdpa",
-        )
+        ).to(device)
         self._autocast_dtype = dtype if master_weights_fp32 else None
         self.model.train()
         # Gradient checkpointing is incompatible with KV caching during the
