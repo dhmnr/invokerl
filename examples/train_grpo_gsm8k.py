@@ -40,8 +40,8 @@ def main():
         config=rl.TrainerConfig(
             model_name_or_path=MODEL,
             algorithm="grpo",
-            total_steps=200,
-            lr=5e-6,
+            total_steps=1000,
+            lr=1e-5,  # cosine-decays to lr_end=1e-6 by step 1000
             warmup_steps=50,
             lr_schedule="cosine",
             lr_end=1e-6,
