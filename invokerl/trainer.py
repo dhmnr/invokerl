@@ -512,9 +512,8 @@ class Trainer:
         self.policy.model = AutoModelForCausalLM.from_pretrained(
             ckpt_dir,
             dtype=self.policy.dtype,
-            device_map=self.policy.device,
             attn_implementation="sdpa",
-        )
+        ).to(self.policy.device)
         self.policy.model.train()
 
         # Sync checkpoint weights to vLLM before re-sharing
