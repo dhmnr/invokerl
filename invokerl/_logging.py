@@ -101,9 +101,12 @@ def log_step(
     reward = metrics.get("reward", 0.0)
     kl = metrics.get("kl", 0.0)
     table.add_row(
-        Text("loss", style="dim"),     Text(f"{loss:+.4f}", style="bold"),
-        Text("reward", style="dim"),   Text(f"{reward:.3f}", style="bold green"),
-        Text("kl", style="dim"),       Text(f"{kl:.4f}", style="bold yellow"),
+        Text("loss", style="dim"),
+        Text(f"{loss:+.4f}", style="bold"),
+        Text("reward", style="dim"),
+        Text(f"{reward:.3f}", style="bold green"),
+        Text("kl", style="dim"),
+        Text(f"{kl:.4f}", style="bold yellow"),
     )
 
     # -- Row 2: optimizer health --------------------------------------------
@@ -111,23 +114,30 @@ def log_step(
     clip_frac = metrics.get("clip_frac", 0.0)
     lr = metrics.get("lr", 0.0)
     table.add_row(
-        Text("gnorm", style="dim"),    Text(f"{gnorm:.2f}", style="bold"),
-        Text("clip_frac", style="dim"), Text(f"{clip_frac:.3f}", style="bold"),
-        Text("lr", style="dim"),       Text(f"{lr:.1e}", style="bold"),
+        Text("gnorm", style="dim"),
+        Text(f"{gnorm:.2f}", style="bold"),
+        Text("clip_frac", style="dim"),
+        Text(f"{clip_frac:.3f}", style="bold"),
+        Text("lr", style="dim"),
+        Text(f"{lr:.1e}", style="bold"),
     )
 
     # -- Row 3: versioning --------------------------------------------------
     weight_ver = metrics.get("weight_version", 0)
     staleness = metrics.get("staleness", 0.0)
     r3 = [
-        Text("version", style="dim"),   Text(f"{weight_ver}", style="bold"),
-        Text("staleness", style="dim"), Text(f"{staleness:.1f}", style="bold"),
+        Text("version", style="dim"),
+        Text(f"{weight_ver}", style="bold"),
+        Text("staleness", style="dim"),
+        Text(f"{staleness:.1f}", style="bold"),
     ]
     if is_fsdp:
-        r3.extend([
-            Text("world", style="dim"),
-            Text(f"{metrics.get('world_size', 1)}", style="bold"),
-        ])
+        r3.extend(
+            [
+                Text("world", style="dim"),
+                Text(f"{metrics.get('world_size', 1)}", style="bold"),
+            ]
+        )
     else:
         r3.extend([Text(""), Text("")])
     table.add_row(*r3)
@@ -139,14 +149,20 @@ def log_step(
         sync_ms = metrics.get("sync_ms", 0.0)
         queue = metrics.get("queue_size", 0)
         table.add_row(
-            Text("wait", style="dim"),  Text(f"{t_wait:.1f}s", style="bold"),
-            Text("train", style="dim"), Text(f"{t_train:.1f}s", style="bold"),
-            Text("sync", style="dim"),  Text(f"{sync_ms:.0f}ms", style="bold"),
+            Text("wait", style="dim"),
+            Text(f"{t_wait:.1f}s", style="bold"),
+            Text("train", style="dim"),
+            Text(f"{t_train:.1f}s", style="bold"),
+            Text("sync", style="dim"),
+            Text(f"{sync_ms:.0f}ms", style="bold"),
         )
         table.add_row(
-            Text("queue", style="dim"), Text(f"{queue}", style="bold"),
-            Text(""), Text(""),
-            Text(""), Text(""),
+            Text("queue", style="dim"),
+            Text(f"{queue}", style="bold"),
+            Text(""),
+            Text(""),
+            Text(""),
+            Text(""),
         )
 
     title = Text.assemble(

@@ -651,13 +651,14 @@ class Trainer:
         # no-op so we don't fight with FSDP output and bar ordering.
         from contextlib import ExitStack
 
+        def _noop_advance(*_, **__):
+            pass
+
         _stack = ExitStack()
         if is_main:
-            advance_progress = _stack.enter_context(
-                training_progress(cfg.total_steps, start_step)
-            )
+            advance_progress = _stack.enter_context(training_progress(cfg.total_steps, start_step))
         else:
-            advance_progress = lambda *_, **__: None
+            advance_progress = _noop_advance
 
         try:
             for step in range(start_step, cfg.total_steps):
