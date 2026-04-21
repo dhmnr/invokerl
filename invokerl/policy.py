@@ -42,6 +42,10 @@ class PolicyModel:
         )
         self._autocast_dtype = dtype if master_weights_fp32 else None
         self.model.train()
+        # Gradient checkpointing is incompatible with KV caching during the
+        # forward pass; disable caching up front so transformers doesn't
+        # emit a warning on the first call.
+        self.model.config.use_cache = False
         self.model.gradient_checkpointing_enable()
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, trust_remote_code=True)

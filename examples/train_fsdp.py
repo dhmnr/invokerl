@@ -9,7 +9,6 @@ vLLM generation stays on cuda:0 and is only driven by rank 0.
 
 from __future__ import annotations
 
-import logging
 import os
 import random
 
@@ -19,7 +18,7 @@ import invokerl as rl
 
 
 def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+    rl.setup_logging()
     random.seed(42)
     torch.manual_seed(42)
 

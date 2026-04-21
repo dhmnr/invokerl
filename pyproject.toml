@@ -24,6 +24,7 @@ dependencies = [
     "datasets>=2.14",
     "matplotlib>=3.7",
     "numpy>=1.24",
+    "rich>=13",
     "safetensors>=0.4",
     "torch>=2.6",
     "transformers>=4.45",

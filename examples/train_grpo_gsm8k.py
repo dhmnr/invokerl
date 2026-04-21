@@ -6,7 +6,6 @@ Run:
 
 from __future__ import annotations
 
-import logging
 import random
 
 import torch
@@ -15,11 +14,7 @@ import invokerl as rl
 
 
 def main():
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    rl.setup_logging()
     random.seed(42)
     torch.manual_seed(42)
 
